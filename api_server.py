@@ -9,24 +9,62 @@ from pydantic import BaseModel
 
 
 # ==== ENV ====
-DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
-# В .env должно быть: ADMIN_API_KEY=твой_секрет
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+  
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+conn = db_connect()
 
 
-# ==== APP ====
-app = FastAPI(title="WalletHunter API", version="1.0")
+def db_init_and_migrate():
+    cur = conn.cursor()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://kozanostro.github.io",
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # базовая таблица
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id     INTEGER PRIMARY KEY,
+        username    TEXT,
+        first_name  TEXT,
+        last_name   TEXT,
+        language    TEXT,
+        created_at  INTEGER,
+        last_seen   INTEGER,
+
+        win_chance  REAL DEFAULT 1.0,
+        gen_level   INTEGER DEFAULT 0,
+
+        bal_mmc     REAL DEFAULT 0,
+        bal_ton     REAL DEFAULT 0,
+        bal_usdt    REAL DEFAULT 0,
+        bal_stars   REAL DEFAULT 0
+    )
+    """)
+
+    # ---- МИГРАЦИЯ ----
+    cur.execute("PRAGMA table_info(users)")
+    existing = {row["name"] for row in cur.fetchall()}
+
+    def add_col(name: str, sql: str):
+        if name not in existing:
+            cur.execute(f"ALTER TABLE users ADD COLUMN {name} {sql}")
+
+    add_col("minutes_in_app", "INTEGER DEFAULT 0")
+    add_col("wallet_status", "TEXT DEFAULT 'idle'")
+    add_col("wallet_address", "TEXT DEFAULT ''")
+    add_col("t_wallet_seconds", "INTEGER DEFAULT 0")
+
+    conn.commit()
+
+
+# ВЫЗОВ ОДИН РАЗ ПРИ СТАРТЕ
+db_init_and_migrate()
+
 
 
 # ==== DB HELPERS ====
@@ -199,3 +237,4 @@ def admin_users(x_api_key: str = Header(default="")):
 
     rows = cur.fetchall()
     return {"ok": True, "users": [dict(r) for r in rows]}
+
