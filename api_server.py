@@ -215,26 +215,39 @@ def health():
 def ping(body: PingBody):
     upsert_user(body)
     return {"ok": True}
-
-
+  
 @app.get("/admin/users")
 def admin_users(x_api_key: str = Header(default="")):
     require_admin(x_api_key)
 
-    conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT user_id, username, first_name, last_name, language, created_at, last_seen,
-               win_chance, gen_level,
-               bal_mmc, bal_ton, bal_usdt, bal_stars,
-               minutes_in_app, wallet_status, wallet_address
-          FROM users
-         ORDER BY last_seen DESC
-         LIMIT 200
-        """
-    )
+    cur.execute("""
+        SELECT
+            user_id,
+            username,
+            first_name,
+            last_name,
+            language,
+            created_at,
+            last_seen,
+            win_chance,
+            gen_level,
+            bal_mmc,
+            bal_ton,
+            bal_usdt,
+            bal_stars,
+            minutes_in_app,
+            wallet_status,
+            wallet_address,
+            t_wallet_seconds
+        FROM users
+        ORDER BY last_seen DESC
+        LIMIT 200
+    """)
 
-    rows = cur.fetchall()
-    return {"ok": True, "users": [dict(r) for r in rows]}
+    return {"ok": True, "users": [dict(r) for r in cur.fetchall()]}
+
+
+
+
 
