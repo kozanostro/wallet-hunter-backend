@@ -252,16 +252,14 @@ def admin_users(x_api_key: str = Header(default="")):
             bal_ton,
             bal_usdt,
             bal_stars,
-            minutes_in_app,
-            wallet_status,
-            wallet_address,
-            t_wallet_seconds
+           
         FROM users
         ORDER BY last_seen DESC
         LIMIT 200
     """)
 
     return {"ok": True, "users": [dict(r) for r in cur.fetchall()]}
+
 
 
 
