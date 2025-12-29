@@ -12,20 +12,32 @@ from pydantic import BaseModel
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
-  
-
-def db_connect():
+   def db_connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-conn = db_connect()
-
-
-def db_init_and_migrate():
+def ensure_user_columns(conn):
     cur = conn.cursor()
+    cur.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in cur.fetchall()}
 
-    # базовая таблица
+    def add(col_sql: str):
+        cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
+
+    if "minutes_in_app" not in existing:
+        add("minutes_in_app INTEGER DEFAULT 0")
+    if "wallet_status" not in existing:
+        add("wallet_status TEXT DEFAULT 'idle'")
+    if "wallet_address" not in existing:
+        add("wallet_address TEXT DEFAULT ''")
+    if "t_wallet_seconds" not in existing:
+        add("t_wallet_seconds INTEGER DEFAULT 0")
+
+    conn.commit()
+
+def db_init(conn):
+    cur = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id     INTEGER PRIMARY KEY,
@@ -45,6 +57,10 @@ def db_init_and_migrate():
         bal_stars   REAL DEFAULT 0
     )
     """)
+    conn.commit()
+
+
+
 
     # ---- МИГРАЦИЯ ----
     cur.execute("PRAGMA table_info(users)")
@@ -246,6 +262,7 @@ def admin_users(x_api_key: str = Header(default="")):
     """)
 
     return {"ok": True, "users": [dict(r) for r in cur.fetchall()]}
+
 
 
 
