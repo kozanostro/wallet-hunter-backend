@@ -127,29 +127,51 @@ def upsert_user(p: PingBody):
 def ping(body: PingBody):
     upsert_user(body)
     return {"ok": True}
-
 @app.get("/admin/users")
-def admin_users(x_api_key: str = Header(default="", alias="X-API-Key")):
+def admin_users(x_api_key: str = Header(default="")):
     require_admin(x_api_key)
 
-    try:
-        with db() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT
-                    user_id, username, first_name, last_name, language, created_at, last_seen,
-                    win_chance, gen_level, bal_mmc, bal_ton, bal_usdt, bal_stars,
-                    minutes_in_app, wallet_status, wallet_address, t_wallet_seconds
-                FROM users
-                ORDER BY last_seen DESC
-                LIMIT 200
-            """)
-            rows = [dict(r) for r in cur.fetchall()]
-            return {"ok": True, "users": rows}
+    conn = db()
+    cur = conn.cursor()
+
+    # Берём только реально существующие поля
+    cur.execute("""
+        SELECT
+            user_id,
+            username,
+            first_name,
+            last_name,
+            language,
+            created_at,
+            last_seen,
+            win_chance,
+            gen_level,
+            bal_mmc,
+            bal_ton,
+            bal_usdt,
+            bal_stars,
+            minutes_in_app,
+            wallet_status,
+            wallet_address,
+            t_wallet_seconds
+        FROM users
+        ORDER BY last_seen DESC
+        LIMIT 200
+    """)
+
+    rows = cur.fetchall()
+    return {
+        "ok": True,
+        "count": len(rows),
+        "users": [dict(r) for r in rows],
+    }
+
+
 
     except sqlite3.OperationalError as e:
         # вот это убирает “мистический 500” — теперь ты увидишь точную причину
         raise HTTPException(status_code=500, detail=f"sqlite error: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"server error: {type(e).__name__}: {e}")
+
 
