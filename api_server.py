@@ -8,115 +8,59 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 
-# ==== ENV ====
-DB_PATH = os.getenv("DB_PATH", "bot.db")
+DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
-   def db_connect():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+app = FastAPI(title="WalletHunter API", version="1.1")
 
-def ensure_user_columns(conn):
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(users)")
-    existing = {row[1] for row in cur.fetchall()}
+# CORS: GitHub Pages + (если надо) добавишь свои домены
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://kozanostro.github.io",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    def add(col_sql: str):
-        cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
-
-    if "minutes_in_app" not in existing:
-        add("minutes_in_app INTEGER DEFAULT 0")
-    if "wallet_status" not in existing:
-        add("wallet_status TEXT DEFAULT 'idle'")
-    if "wallet_address" not in existing:
-        add("wallet_address TEXT DEFAULT ''")
-    if "t_wallet_seconds" not in existing:
-        add("t_wallet_seconds INTEGER DEFAULT 0")
-
-    conn.commit()
-
-def db_init(conn):
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id     INTEGER PRIMARY KEY,
-        username    TEXT,
-        first_name  TEXT,
-        last_name   TEXT,
-        language    TEXT,
-        created_at  INTEGER,
-        last_seen   INTEGER,
-
-        win_chance  REAL DEFAULT 1.0,
-        gen_level   INTEGER DEFAULT 0,
-
-        bal_mmc     REAL DEFAULT 0,
-        bal_ton     REAL DEFAULT 0,
-        bal_usdt    REAL DEFAULT 0,
-        bal_stars   REAL DEFAULT 0
-    )
-    """)
-    conn.commit()
-
-
-
-
-    # ---- МИГРАЦИЯ ----
-    cur.execute("PRAGMA table_info(users)")
-    existing = {row["name"] for row in cur.fetchall()}
-
-    def add_col(name: str, sql: str):
-        if name not in existing:
-            cur.execute(f"ALTER TABLE users ADD COLUMN {name} {sql}")
-
-    add_col("minutes_in_app", "INTEGER DEFAULT 0")
-    add_col("wallet_status", "TEXT DEFAULT 'idle'")
-    add_col("wallet_address", "TEXT DEFAULT ''")
-    add_col("t_wallet_seconds", "INTEGER DEFAULT 0")
-
-    conn.commit()
-
-
-# ВЫЗОВ ОДИН РАЗ ПРИ СТАРТЕ
-db_init_and_migrate()
-
-
-
-# ==== DB HELPERS ====
-_conn: Optional[sqlite3.Connection] = None
-
+# --- DB helpers -------------------------------------------------------------
 
 def db_connect() -> sqlite3.Connection:
-    """
-    Единое подключение для простого MVP.
-    Важно: timeout + WAL уменьшают шанс 'database is locked'.
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    # timeout важен при конкурентном доступе (бот + api)
+    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Настройки против блокировок (SQLite)
+    # Лечит "database is locked" на практике (бот и API одновременно)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")  # 5 сек ждать, вместо падения
 
     return conn
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
+def add_col(cur: sqlite3.Cursor, table: str, col_name: str, col_sql: str):
+    cur.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cur.fetchall()}
+    if col_name not in existing:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_sql}")
 
-    # Базовая таблица users (минимум)
-    cur.execute(
-        """
+
+def db_init_and_migrate():
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+
+        # Базовая таблица (минимум). Колонки миграциями добьём.
+        cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id     INTEGER PRIMARY KEY,
-            username    TEXT DEFAULT '',
-            first_name  TEXT DEFAULT '',
-            last_name   TEXT DEFAULT '',
-            language    TEXT DEFAULT '',
-            created_at  INTEGER DEFAULT 0,
-            last_seen   INTEGER DEFAULT 0,
+            username    TEXT,
+            first_name  TEXT,
+            last_name   TEXT,
+            language    TEXT,
+            created_at  INTEGER,
+            last_seen   INTEGER,
 
             win_chance  REAL DEFAULT 1.0,
             gen_level   INTEGER DEFAULT 0,
@@ -126,47 +70,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             bal_usdt    REAL DEFAULT 0,
             bal_stars   REAL DEFAULT 0
         )
-        """
-    )
+        """)
 
-    # Миграции: добавляем колонки, если их нет
-    cur.execute("PRAGMA table_info(users)")
-    existing = {row[1] for row in cur.fetchall()}
+        # Миграции: добавим то, что у тебя уже всплывало в логах
+        add_col(cur, "users", "minutes_in_app", "minutes_in_app INTEGER DEFAULT 0")
+        add_col(cur, "users", "wallet_status", "wallet_status TEXT DEFAULT 'idle'")
+        add_col(cur, "users", "wallet_address", "wallet_address TEXT DEFAULT ''")
+        add_col(cur, "users", "t_wallet_seconds", "t_wallet_seconds INTEGER DEFAULT 0")
 
-    def add_col(name: str, ddl: str) -> None:
-        if name not in existing:
-            cur.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
-
-    add_col("minutes_in_app", "INTEGER DEFAULT 0")
-    add_col("wallet_status", "TEXT DEFAULT 'idle'")
-    add_col("wallet_address", "TEXT DEFAULT ''")
-
-    conn.commit()
-
-
-def get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = db_connect()
-        ensure_schema(_conn)
-    return _conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @app.on_event("startup")
-def _startup() -> None:
-    # Прогреваем подключение и схему при старте
-    get_conn()
+def on_startup():
+    db_init_and_migrate()
 
 
-# ==== AUTH ====
-def require_admin(x_api_key: str) -> None:
-    if not ADMIN_API_KEY:
-        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server")
-    if (x_api_key or "").strip() != ADMIN_API_KEY:
-        raise HTTPException(status_code=403, detail="Forbidden")
+# --- Models ----------------------------------------------------------------
 
-
-# ==== MODELS ====
 class PingBody(BaseModel):
     user_id: int
     username: Optional[str] = ""
@@ -176,52 +99,17 @@ class PingBody(BaseModel):
     app: Optional[str] = "WalletHunter"
 
 
-# ==== LOGIC ====
-def upsert_user(p: PingBody) -> None:
-    conn = get_conn()
-    now = int(time.time())
-    cur = conn.cursor()
+# --- Auth ------------------------------------------------------------------
 
-    cur.execute("SELECT user_id FROM users WHERE user_id=?", (p.user_id,))
-    exists = cur.fetchone() is not None
-
-    if not exists:
-        cur.execute(
-            """
-            INSERT INTO users (user_id, username, first_name, last_name, language, created_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                p.user_id,
-                p.username or "",
-                p.first_name or "",
-                p.last_name or "",
-                p.language or "",
-                now,
-                now,
-            ),
-        )
-    else:
-        cur.execute(
-            """
-            UPDATE users
-               SET username=?, first_name=?, last_name=?, language=?, last_seen=?
-             WHERE user_id=?
-            """,
-            (
-                p.username or "",
-                p.first_name or "",
-                p.last_name or "",
-                p.language or "",
-                now,
-                p.user_id,
-            ),
-        )
-
-    conn.commit()
+def require_admin(x_api_key: str):
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server")
+    if x_api_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
-# ==== ROUTES ====
+# --- Routes ----------------------------------------------------------------
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
@@ -229,40 +117,80 @@ def health():
 
 @app.post("/ping")
 def ping(body: PingBody):
-    upsert_user(body)
-    return {"ok": True}
-  
+    now = int(time.time())
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+
+        # На всякий — если БД старую подсунули, миграции догонят
+        add_col(cur, "users", "minutes_in_app", "minutes_in_app INTEGER DEFAULT 0")
+        add_col(cur, "users", "wallet_status", "wallet_status TEXT DEFAULT 'idle'")
+        add_col(cur, "users", "wallet_address", "wallet_address TEXT DEFAULT ''")
+        add_col(cur, "users", "t_wallet_seconds", "t_wallet_seconds INTEGER DEFAULT 0")
+
+        cur.execute("SELECT user_id FROM users WHERE user_id=?", (body.user_id,))
+        exists = cur.fetchone() is not None
+
+        if not exists:
+            cur.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, language, created_at, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                body.user_id,
+                body.username or "",
+                body.first_name or "",
+                body.last_name or "",
+                body.language or "",
+                now, now
+            ))
+        else:
+            cur.execute("""
+                UPDATE users
+                   SET username=?, first_name=?, last_name=?, language=?, last_seen=?
+                 WHERE user_id=?
+            """, (
+                body.username or "",
+                body.first_name or "",
+                body.last_name or "",
+                body.language or "",
+                now,
+                body.user_id
+            ))
+
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.get("/admin/users")
-def admin_users(x_api_key: str = Header(default="")):
+def admin_users(x_api_key: str = Header(default="", alias="X-API-Key")):
     require_admin(x_api_key)
 
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            user_id,
-            username,
-            first_name,
-            last_name,
-            language,
-            created_at,
-            last_seen,
-            win_chance,
-            gen_level,
-            bal_mmc,
-            bal_ton,
-            bal_usdt,
-            bal_stars,
-           
-        FROM users
-        ORDER BY last_seen DESC
-        LIMIT 200
-    """)
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
 
-    return {"ok": True, "users": [dict(r) for r in cur.fetchall()]}
+        # Гарантируем, что колонки есть до SELECT
+        add_col(cur, "users", "minutes_in_app", "minutes_in_app INTEGER DEFAULT 0")
+        add_col(cur, "users", "wallet_status", "wallet_status TEXT DEFAULT 'idle'")
+        add_col(cur, "users", "wallet_address", "wallet_address TEXT DEFAULT ''")
+        add_col(cur, "users", "t_wallet_seconds", "t_wallet_seconds INTEGER DEFAULT 0")
+        conn.commit()
 
+        cur.execute("""
+            SELECT
+                user_id, username, first_name, last_name, language,
+                created_at, last_seen,
+                win_chance, gen_level,
+                bal_mmc, bal_ton, bal_usdt, bal_stars,
+                minutes_in_app, wallet_status, wallet_address, t_wallet_seconds
+            FROM users
+            ORDER BY last_seen DESC
+            LIMIT 200
+        """)
 
-
-
-
-
-
+        rows = [dict(r) for r in cur.fetchall()]
+        return {"ok": True, "users": rows}
+    finally:
+        conn.close()
