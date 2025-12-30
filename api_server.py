@@ -1,42 +1,42 @@
 import os
 import time
 import sqlite3
-from typing import Optional, Dict, Any, List
+from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --------- ENV ----------
+# -------------------- CONFIG --------------------
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+ADMIN_API_KEY = (os.getenv("ADMIN_API_KEY") or "").strip()
 
-app = FastAPI(title="WalletHunter API", version="1.2")
+APP_TITLE = "WalletHunter API"
+APP_VERSION = "1.2.0"
+
+# -------------------- APP --------------------
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://kozanostro.github.io"],
+    allow_origins=["*"],  # потом сузим до GitHub Pages домена
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------- DB helpers ----------
-def db_connect() -> sqlite3.Connection:
-    # timeout важен, чтобы не ловить "database is locked" на ровном месте
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+# -------------------- DB HELPERS --------------------
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
-    # WAL обычно сильно снижает шанс блокировок
+    # чуть меньше “database is locked”
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
-
-def db_init_and_migrate() -> None:
-    with db_connect() as conn:
+def _ensure_schema() -> None:
+    with db() as conn:
         cur = conn.cursor()
-
-        # Базовая таблица
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id     INTEGER PRIMARY KEY,
@@ -56,31 +56,31 @@ def db_init_and_migrate() -> None:
             bal_stars   REAL DEFAULT 0
         )
         """)
+        conn.commit()
 
-        # Мягкие миграции: добавляем колонки если их нет
         cur.execute("PRAGMA table_info(users)")
         existing = {row[1] for row in cur.fetchall()}
 
-        def add_col(name: str, ddl: str):
-            if name in existing:
-                return
-            cur.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
+        def add_col(name: str, col_sql: str) -> None:
+            if name not in existing:
+                cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
 
-        add_col("minutes_in_app", "INTEGER DEFAULT 0")
-        add_col("wallet_status", "TEXT DEFAULT 'idle'")
-        add_col("wallet_address", "TEXT DEFAULT ''")
-        add_col("t_wallet_seconds", "INTEGER DEFAULT 0")
+        # твои “новые” поля — всегда добавляем (если их нет)
+        add_col("minutes_in_app", "minutes_in_app INTEGER DEFAULT 0")
+        add_col("wallet_status", "wallet_status TEXT DEFAULT 'idle'")
+        add_col("wallet_address", "wallet_address TEXT DEFAULT ''")
+        add_col("t_wallet_seconds", "t_wallet_seconds INTEGER DEFAULT 0")
 
         conn.commit()
 
+@app.on_event("startup")
+def on_startup():
+    _ensure_schema()
+    # важная диагностика: чтобы сразу видеть, подхватился ли ключ
+    print(f"[STARTUP] DB_PATH={DB_PATH}")
+    print(f"[STARTUP] ADMIN_API_KEY set={bool(ADMIN_API_KEY)}")
 
-def get_existing_user_columns(conn: sqlite3.Connection) -> List[str]:
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(users)")
-    return [row[1] for row in cur.fetchall()]
-
-
-# --------- Models ----------
+# -------------------- MODELS --------------------
 class PingBody(BaseModel):
     user_id: int
     username: Optional[str] = ""
@@ -89,32 +89,23 @@ class PingBody(BaseModel):
     language: Optional[str] = ""
     app: Optional[str] = "WalletHunter"
 
-
-# --------- Auth ----------
+# -------------------- AUTH --------------------
 def require_admin(x_api_key: str):
     if not ADMIN_API_KEY:
-        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server")
-    if x_api_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server (.env not loaded?)")
+    if (x_api_key or "").strip() != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-
-# --------- Startup ----------
-@app.on_event("startup")
-def on_startup():
-    db_init_and_migrate()
-
-
-# --------- Routes ----------
+# -------------------- ROUTES --------------------
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
 
-
 def upsert_user(p: PingBody):
     now = int(time.time())
-    with db_connect() as conn:
+    with db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE user_id=?", (p.user_id,))
+        cur.execute("SELECT 1 FROM users WHERE user_id=?", (p.user_id,))
         exists = cur.fetchone() is not None
 
         if not exists:
@@ -128,48 +119,34 @@ def upsert_user(p: PingBody):
                    SET username=?, first_name=?, last_name=?, language=?, last_seen=?
                  WHERE user_id=?
             """, (p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, p.user_id))
-
         conn.commit()
-
 
 @app.post("/ping")
 def ping(body: PingBody):
     upsert_user(body)
     return {"ok": True}
 
-
 @app.get("/admin/users")
-def admin_users(x_api_key: str = Header(default="")):
+def admin_users(x_api_key: str = Header(default="", alias="X-API-Key")):
     require_admin(x_api_key)
 
     try:
-        with db_connect() as conn:
-            cols = set(get_existing_user_columns(conn))
-
-            # какие колонки хотим видеть (НО берём только те, что реально есть)
-            wanted = [
-                "user_id", "username", "first_name", "last_name", "language",
-                "created_at", "last_seen",
-                "minutes_in_app", "wallet_status", "wallet_address", "t_wallet_seconds",
-                "win_chance", "gen_level",
-                "bal_mmc", "bal_ton", "bal_usdt", "bal_stars",
-            ]
-            selected = [c for c in wanted if c in cols]
-            if not selected:
-                raise HTTPException(status_code=500, detail="users table has no selectable columns (?)")
-
-            sql = f"""
-                SELECT {", ".join(selected)}
-                  FROM users
-                 ORDER BY last_seen DESC
-                 LIMIT 200
-            """
-
+        with db() as conn:
             cur = conn.cursor()
-            cur.execute(sql)
-            rows = cur.fetchall()
-            return {"ok": True, "columns": selected, "users": [dict(r) for r in rows]}
+            cur.execute("""
+                SELECT
+                    user_id, username, first_name, last_name, language, created_at, last_seen,
+                    win_chance, gen_level, bal_mmc, bal_ton, bal_usdt, bal_stars,
+                    minutes_in_app, wallet_status, wallet_address, t_wallet_seconds
+                FROM users
+                ORDER BY last_seen DESC
+                LIMIT 200
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+            return {"ok": True, "users": rows}
 
-    except sqlite3.Error as e:
-        # чтобы не было “тихих 500”
+    except sqlite3.OperationalError as e:
+        # вот это убирает “мистический 500” — теперь ты увидишь точную причину
         raise HTTPException(status_code=500, detail=f"sqlite error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"server error: {type(e).__name__}: {e}")
