@@ -1,3 +1,5 @@
+print("=== API_SERVER LOADED FROM /opt/wallethunter/backend/api_server.py ===")
+
 import os
 import time
 import sqlite3
@@ -150,3 +152,4 @@ def admin_users(x_api_key: str = Header(default="", alias="X-API-Key")):
         raise HTTPException(status_code=500, detail=f"sqlite error: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"server error: {type(e).__name__}: {e}")
+
