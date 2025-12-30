@@ -23,6 +23,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+   def ensure_user_columns():
+     conn = sqlite3.connect(DB_PATH)
+     cur = conn.cursor()
+     cur.execute("PRAGMA table_info(users)")
+     existing = {row[1] for row in cur.fetchall()}
+
+    def add(col):
+        cur.execute(f"ALTER TABLE users ADD COLUMN {col}")
+
+    if "t_wallet_seconds" not in existing:
+        add("t_wallet_seconds INTEGER DEFAULT 0")
+
+    if "wallet_address" not in existing:
+        add("wallet_address TEXT DEFAULT ''")
+
+    conn.commit()
+    conn.close()
 
 # --------- DB helpers ---------
 def db_connect() -> sqlite3.Connection:
@@ -176,3 +193,4 @@ def admin_users(x_api_key: str = Header(default="")):
     rows = cur.fetchall()
     conn.close()
     return {"ok": True, "users": [dict(r) for r in rows]}
+
