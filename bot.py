@@ -1,22 +1,42 @@
+import os
 import sqlite3
 import time
+import traceback
+from typing import Set
+
 from telebot import TeleBot, types
 
-# ===================== НАСТРОЙКИ =====================
-BOT_TOKEN = "8269898838:AAEC6ud1Dv0zpIYgBX84sGudW0HzGnk24BE"
+# ===================== ENV / SETTINGS =====================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env")
 
-DOMINO_WEBAPP_URL = "https://kozanostro.github.io/miniapp/?v=21"
-WALLETHUNTER_WEBAPP_URL = "https://kozanostro.github.io/wallet-hunter-miniapp/?v=1"
+DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db").strip()
 
-DB_PATH = "bot.db"
+DOMINO_WEBAPP_URL = os.getenv("DOMINO_WEBAPP_URL", "https://kozanostro.github.io/miniapp/?v=21").strip()
+WALLETHUNTER_WEBAPP_URL = os.getenv("WALLETHUNTER_WEBAPP_URL", "https://kozanostro.github.io/wallet-hunter-miniapp/?v=1").strip()
 
-# ВАЖНО: поставь сюда свой Telegram ID (узнаешь командой /myid)
-ADMIN_IDS = {1901263391}  # <-- замени 0 на свой id, можно несколько: {111, 222}
+def parse_admin_ids(s: str) -> Set[int]:
+    s = (s or "").strip()
+    if not s:
+        return set()
+    out = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except:
+            pass
+    return out
 
-# =====================================================
+ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "1901263391"))
 
 bot = TeleBot(BOT_TOKEN)
 
+print(f"[BOT] starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
+# =========================================================
 
 # ===================== DB =====================
 def db_connect():
@@ -25,6 +45,25 @@ def db_connect():
     return conn
 
 conn = db_connect()
+
+def ensure_user_columns(cur):
+    cur.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in cur.fetchall()}
+
+    def add(col_sql: str):
+        cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
+
+    # Эти поля уже добавлял API — но на всякий случай держим миграцию и тут.
+    if "minutes_in_app" not in existing:
+        add("minutes_in_app INTEGER DEFAULT 0")
+    if "wallet_status" not in existing:
+        add("wallet_status TEXT DEFAULT 'idle'")
+    if "wallet_address" not in existing:
+        add("wallet_address TEXT DEFAULT ''")
+    if "t_wallet_seconds" not in existing:
+        add("t_wallet_seconds INTEGER DEFAULT 0")
+    if "t_seed_seconds" not in existing:
+        add("t_seed_seconds INTEGER DEFAULT 900")
 
 def db_init():
     cur = conn.cursor()
@@ -49,11 +88,15 @@ def db_init():
     """)
     conn.commit()
 
+    # миграции
+    cur = conn.cursor()
+    ensure_user_columns(cur)
+    conn.commit()
+
 db_init()
 
 
 def upsert_user(tg_user):
-    """Регистрирует/обновляет пользователя в БД."""
     now = int(time.time())
     user_id = tg_user.id
     username = tg_user.username or ""
@@ -81,7 +124,8 @@ def upsert_user(tg_user):
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS and 0 not in ADMIN_IDS
+    return user_id in ADMIN_IDS
+# =========================================================
 
 
 # ===================== UI =====================
@@ -115,6 +159,49 @@ def cabinet_menu():
     kb.add(types.InlineKeyboardButton("👤 Кабинет Domino", web_app=types.WebAppInfo(url=domino_cabinet_url)))
     kb.add(types.InlineKeyboardButton("👤 Кабинет WalletHunter", web_app=types.WebAppInfo(url=wh_cabinet_url)))
     return kb
+# =========================================================
+
+
+# ===================== FEEDBACK FLOW =====================
+# Состояние "ждём сообщение фидбэка"
+WAIT_FEEDBACK = set()
+
+@bot.message_handler(func=lambda m: m.text == "📩 Обратная связь")
+def on_feedback(message):
+    upsert_user(message.from_user)
+    WAIT_FEEDBACK.add(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "Напиши сообщение одним текстом — я отправлю его админу.",
+        reply_markup=main_menu()
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id in WAIT_FEEDBACK and (m.text is not None))
+def on_feedback_text(message):
+    WAIT_FEEDBACK.discard(message.from_user.id)
+    upsert_user(message.from_user)
+
+    txt = message.text.strip()
+    if not txt:
+        bot.send_message(message.chat.id, "Пустое сообщение, попробуй ещё раз.", reply_markup=main_menu())
+        return
+
+    sender = f"{message.from_user.id} @{message.from_user.username or ''} {message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
+    payload = f"📩 Feedback\nОт: {sender}\n\n{txt}"
+
+    sent_any = False
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, payload)
+            sent_any = True
+        except Exception:
+            pass
+
+    if sent_any:
+        bot.send_message(message.chat.id, "✅ Отправлено админу.", reply_markup=main_menu())
+    else:
+        bot.send_message(message.chat.id, "⚠️ Не удалось доставить админу (проверь ADMIN_IDS).", reply_markup=main_menu())
+# =========================================================
 
 
 # ===================== HANDLERS =====================
@@ -152,16 +239,6 @@ def on_staking(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "📩 Обратная связь")
-def on_feedback(message):
-    upsert_user(message.from_user)
-    bot.send_message(
-        message.chat.id,
-        "Обратная связь:\nНапиши сообщение, я передам в админ-чат (сделаем дальше).",
-        reply_markup=main_menu()
-    )
-
-
 @bot.callback_query_handler(func=lambda c: True)
 def on_callback(call):
     if call.data == "game_smash":
@@ -169,9 +246,10 @@ def on_callback(call):
         bot.send_message(call.message.chat.id, "Smash: в разработке.")
     else:
         bot.answer_callback_query(call.id, "Неизвестная команда")
+# =========================================================
 
 
-# ===================== ADMIN COMMANDS =====================
+# ===================== ADMIN =====================
 def admin_guard(message) -> bool:
     if not is_admin(message.from_user.id):
         bot.send_message(message.chat.id, "⛔ Команда доступна только админу.")
@@ -342,13 +420,7 @@ def cmd_setbal(message):
         bot.send_message(message.chat.id, "Неверный формат. Пример: /setbal 123 usdt 50")
         return
 
-    col = {
-        "mmc": "bal_mmc",
-        "ton": "bal_ton",
-        "usdt": "bal_usdt",
-        "stars": "bal_stars"
-    }.get(asset)
-
+    col = {"mmc": "bal_mmc", "ton": "bal_ton", "usdt": "bal_usdt", "stars": "bal_stars"}.get(asset)
     if not col:
         bot.send_message(message.chat.id, "Asset должен быть: mmc | ton | usdt | stars")
         return
@@ -357,9 +429,15 @@ def cmd_setbal(message):
     cur.execute(f"UPDATE users SET {col}=? WHERE user_id=?", (value, uid))
     conn.commit()
     bot.send_message(message.chat.id, f"✅ {asset} для {uid} = {value}")
+# =========================================================
 
 
 # ===================== RUN =====================
 if __name__ == "__main__":
-    print("Bot started. DB:", DB_PATH)
-    bot.infinity_polling(skip_pending=True)
+    try:
+        print(f"[BOT] Bot started. DB={DB_PATH}")
+        bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+    except Exception:
+        print("[BOT] FATAL ERROR:")
+        print(traceback.format_exc())
+        raise
