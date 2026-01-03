@@ -1,88 +1,93 @@
-print("=== API_SERVER LOADED FROM /opt/wallethunter/backend/api_server.py ===")
-
 import os
 import time
 import sqlite3
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-# -------------------- CONFIG --------------------
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
-ADMIN_API_KEY = (os.getenv("ADMIN_API_KEY") or "").strip()
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 
-APP_TITLE = "WalletHunter API"
-APP_VERSION = "1.2.0"
+MMMCOIN_TOTAL_SUPPLY = 30_000_000.0
 
-# -------------------- APP --------------------
-app = FastAPI(title=APP_TITLE, version=APP_VERSION)
+app = FastAPI(title="WalletHunter API", version="1.2")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # потом сузим до GitHub Pages домена
+    allow_origins=[
+        "https://kozanostro.github.io",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------- DB HELPERS --------------------
-def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+# ---------------- DB ----------------
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # чуть меньше “database is locked”
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
-def _ensure_schema() -> None:
-    with db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id     INTEGER PRIMARY KEY,
-            username    TEXT,
-            first_name  TEXT,
-            last_name   TEXT,
-            language    TEXT,
-            created_at  INTEGER,
-            last_seen   INTEGER,
+conn = db_connect()
 
-            win_chance  REAL DEFAULT 1.0,
-            gen_level   INTEGER DEFAULT 0,
+def db_init():
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id     INTEGER PRIMARY KEY,
+        username    TEXT,
+        first_name  TEXT,
+        last_name   TEXT,
+        language    TEXT,
+        created_at  INTEGER,
+        last_seen   INTEGER,
 
-            bal_mmc     REAL DEFAULT 0,
-            bal_ton     REAL DEFAULT 0,
-            bal_usdt    REAL DEFAULT 0,
-            bal_stars   REAL DEFAULT 0
-        )
-        """)
-        conn.commit()
+        minutes_in_app INTEGER DEFAULT 0,
+        wallet_status  TEXT DEFAULT 'idle',
+        wallet_address TEXT DEFAULT '',
 
-        cur.execute("PRAGMA table_info(users)")
-        existing = {row[1] for row in cur.fetchall()}
+        win_chance  REAL DEFAULT 1.0,
+        gen_level   INTEGER DEFAULT 0,
 
-        def add_col(name: str, col_sql: str) -> None:
-            if name not in existing:
-                cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
+        t_wallet_seconds INTEGER DEFAULT 0,
+        t_seed_seconds   INTEGER DEFAULT 900,
 
-        # твои “новые” поля — всегда добавляем (если их нет)
-        add_col("minutes_in_app", "minutes_in_app INTEGER DEFAULT 0")
-        add_col("wallet_status", "wallet_status TEXT DEFAULT 'idle'")
-        add_col("wallet_address", "wallet_address TEXT DEFAULT ''")
-        add_col("t_wallet_seconds", "t_wallet_seconds INTEGER DEFAULT 0")
+        bal_mmc     REAL DEFAULT 0,
+        bal_ton     REAL DEFAULT 0,
+        bal_usdt    REAL DEFAULT 0,
+        bal_stars   REAL DEFAULT 0
+    )
+    """)
+    conn.commit()
 
-        conn.commit()
+def ensure_user_columns():
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in cur.fetchall()}
 
-@app.on_event("startup")
-def on_startup():
-    _ensure_schema()
-    # важная диагностика: чтобы сразу видеть, подхватился ли ключ
-    print(f"[STARTUP] DB_PATH={DB_PATH}")
-    print(f"[STARTUP] ADMIN_API_KEY set={bool(ADMIN_API_KEY)}")
+    def add(col_sql: str):
+        cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
 
-# -------------------- MODELS --------------------
+    # добавляем недостающие, если база старая
+    if "minutes_in_app" not in existing:
+        add("minutes_in_app INTEGER DEFAULT 0")
+    if "wallet_status" not in existing:
+        add("wallet_status TEXT DEFAULT 'idle'")
+    if "wallet_address" not in existing:
+        add("wallet_address TEXT DEFAULT ''")
+    if "t_wallet_seconds" not in existing:
+        add("t_wallet_seconds INTEGER DEFAULT 0")
+    if "t_seed_seconds" not in existing:
+        add("t_seed_seconds INTEGER DEFAULT 900")
+
+    conn.commit()
+
+db_init()
+ensure_user_columns()
+
+# ---------------- Models ----------------
 class PingBody(BaseModel):
     user_id: int
     username: Optional[str] = ""
@@ -91,87 +96,151 @@ class PingBody(BaseModel):
     language: Optional[str] = ""
     app: Optional[str] = "WalletHunter"
 
-# -------------------- AUTH --------------------
+class EventBody(BaseModel):
+    user_id: int
+    event: str = Field(..., description="open|phase_wallet_start|phase_wallet_done|phase_seed_start|phase_seed_done|close")
+    phase: Optional[str] = ""
+    minutes_delta: Optional[int] = 0  # прибавка минут (когда закрыли)
+    wallet_address: Optional[str] = ""
+    wallet_status: Optional[str] = ""
+
+class AdminUpdateBody(BaseModel):
+    user_id: int
+    win_chance: Optional[float] = None
+    gen_level: Optional[int] = None
+    t_wallet_seconds: Optional[int] = None
+    t_seed_seconds: Optional[int] = None
+
+    bal_mmc: Optional[float] = None
+    bal_ton: Optional[float] = None
+    bal_usdt: Optional[float] = None
+    bal_stars: Optional[float] = None
+
+    wallet_address: Optional[str] = None
+    wallet_status: Optional[str] = None
+    minutes_in_app: Optional[int] = None
+
+# ---------------- Helpers ----------------
 def require_admin(x_api_key: str):
     if not ADMIN_API_KEY:
-        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server (.env not loaded?)")
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not set on server")
     if (x_api_key or "").strip() != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-# -------------------- ROUTES --------------------
+def upsert_user(p: PingBody):
+    now = int(time.time())
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE user_id=?", (p.user_id,))
+    exists = cur.fetchone() is not None
+
+    if not exists:
+        cur.execute("""
+            INSERT INTO users (user_id, username, first_name, last_name, language, created_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (p.user_id, p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, now))
+    else:
+        cur.execute("""
+            UPDATE users
+               SET username=?, first_name=?, last_name=?, language=?, last_seen=?
+             WHERE user_id=?
+        """, (p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, p.user_id))
+
+    conn.commit()
+
+def get_user_row(user_id: int) -> sqlite3.Row:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    r = cur.fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail="User not found")
+    return r
+
+# ---------------- Routes ----------------
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
-
-def upsert_user(p: PingBody):
-    now = int(time.time())
-    with db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM users WHERE user_id=?", (p.user_id,))
-        exists = cur.fetchone() is not None
-
-        if not exists:
-            cur.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, language, created_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (p.user_id, p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, now))
-        else:
-            cur.execute("""
-                UPDATE users
-                   SET username=?, first_name=?, last_name=?, language=?, last_seen=?
-                 WHERE user_id=?
-            """, (p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, p.user_id))
-        conn.commit()
 
 @app.post("/ping")
 def ping(body: PingBody):
     upsert_user(body)
     return {"ok": True}
+
+@app.get("/config")
+def config(user_id: int):
+    r = get_user_row(user_id)
+    # отдаем настройки для игры (секунды) + коэффициенты
+    return {
+        "ok": True,
+        "user_id": r["user_id"],
+        "t_wallet_seconds": int(r["t_wallet_seconds"] or 0),
+        "t_seed_seconds": int(r["t_seed_seconds"] or 900),
+        "win_chance": float(r["win_chance"] or 1.0),
+        "gen_level": int(r["gen_level"] or 0),
+        "wallet_status": r["wallet_status"] or "idle",
+        "wallet_address": r["wallet_address"] or "",
+        "mmmcoin_total_supply": MMMCOIN_TOTAL_SUPPLY,
+    }
+
+@app.post("/event")
+def event(body: EventBody):
+    # логирование/учет времени в приложении
+    r = get_user_row(body.user_id)
+    cur = conn.cursor()
+
+    # обновим last_seen
+    now = int(time.time())
+    cur.execute("UPDATE users SET last_seen=? WHERE user_id=?", (now, body.user_id))
+
+    # учёт минут
+    if body.minutes_delta and body.minutes_delta > 0:
+        new_minutes = int(r["minutes_in_app"] or 0) + int(body.minutes_delta)
+        cur.execute("UPDATE users SET minutes_in_app=? WHERE user_id=?", (new_minutes, body.user_id))
+
+    # обновление статуса/адреса (если прислали)
+    if body.wallet_address is not None and body.wallet_address != "":
+        cur.execute("UPDATE users SET wallet_address=? WHERE user_id=?", (body.wallet_address, body.user_id))
+    if body.wallet_status is not None and body.wallet_status != "":
+        cur.execute("UPDATE users SET wallet_status=? WHERE user_id=?", (body.wallet_status, body.user_id))
+
+    conn.commit()
+    return {"ok": True}
+
 @app.get("/admin/users")
 def admin_users(x_api_key: str = Header(default="")):
     require_admin(x_api_key)
 
-    conn = db()
     cur = conn.cursor()
-
-    # Берём только реально существующие поля
     cur.execute("""
-        SELECT
-            user_id,
-            username,
-            first_name,
-            last_name,
-            language,
-            created_at,
-            last_seen,
-            win_chance,
-            gen_level,
-            bal_mmc,
-            bal_ton,
-            bal_usdt,
-            bal_stars,
-            minutes_in_app,
-            wallet_status,
-            wallet_address,
-            t_wallet_seconds
-        FROM users
-        ORDER BY last_seen DESC
-        LIMIT 200
+        SELECT user_id, username, first_name, last_name, language, created_at, last_seen,
+               minutes_in_app, wallet_status, wallet_address,
+               win_chance, gen_level, t_wallet_seconds, t_seed_seconds,
+               bal_mmc, bal_ton, bal_usdt, bal_stars
+          FROM users
+         ORDER BY last_seen DESC
+         LIMIT 500
     """)
+    rows = [dict(r) for r in cur.fetchall()]
+    return {"ok": True, "users": rows, "mmmcoin_total_supply": MMMCOIN_TOTAL_SUPPLY}
 
-    rows = cur.fetchall()
-    return {
-        "ok": True,
-        "count": len(rows),
-        "users": [dict(r) for r in rows],
-    }
+@app.post("/admin/user/update")
+def admin_user_update(body: AdminUpdateBody, x_api_key: str = Header(default="")):
+    require_admin(x_api_key)
+    _ = get_user_row(body.user_id)
 
+    fields: Dict[str, Any] = {}
+    for k, v in body.model_dump().items():
+        if k == "user_id":
+            continue
+        if v is not None:
+            fields[k] = v
 
+    if not fields:
+        return {"ok": True, "updated": False}
 
-    except sqlite3.OperationalError as e:
-        # вот это убирает “мистический 500” — теперь ты увидишь точную причину
-        raise HTTPException(status_code=500, detail=f"sqlite error: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"server error: {type(e).__name__}: {e}")
+    sets = ", ".join([f"{k}=?" for k in fields.keys()])
+    vals = list(fields.values()) + [body.user_id]
 
-
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
+    conn.commit()
+    return {"ok": True, "updated": True, "fields": list(fields.keys())}
