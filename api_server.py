@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
@@ -109,42 +110,60 @@ class EventBody(BaseModel):
     wallet_address: Optional[str] = ""
     wallet_status: Optional[str] = ""
 
+
 class AdminUpdateBody(BaseModel):
-    user_id: int
+    # разрешаем принимать и snake_case и camelCase
+    model_config = ConfigDict(populate_by_name=True)
 
-    win_chance: Optional[float] = None
-    gen_level: Optional[int] = None
-    t_wallet_seconds: Optional[int] = None
-    t_seed_seconds: Optional[int] = None
+    user_id: int = Field(..., alias="userId")
 
-    bal_mmc: Optional[float] = None
-    bal_ton: Optional[float] = None
-    bal_usdt: Optional[float] = None
-    bal_stars: Optional[float] = None
+    win_chance: Optional[float] = Field(default=None, alias="winChance")
+    gen_level: Optional[int] = Field(default=None, alias="genLevel")
+    t_wallet_seconds: Optional[int] = Field(default=None, alias="tWalletSeconds")
+    t_seed_seconds: Optional[int] = Field(default=None, alias="tSeedSeconds")
 
-    wallet_address: Optional[str] = None
-    wallet_status: Optional[str] = None
-    minutes_in_app: Optional[int] = None
+    bal_mmc: Optional[float] = Field(default=None, alias="balMmc")
+    bal_ton: Optional[float] = Field(default=None, alias="balTon")
+    bal_usdt: Optional[float] = Field(default=None, alias="balUsdt")
+    bal_stars: Optional[float] = Field(default=None, alias="balStars")
+
+    wallet_address: Optional[str] = Field(default=None, alias="walletAddress")
+    wallet_status: Optional[str] = Field(default=None, alias="walletStatus")
+    minutes_in_app: Optional[int] = Field(default=None, alias="minutesInApp")
 
     @field_validator("win_chance")
     @classmethod
     def clamp_win(cls, v):
         if v is None:
             return v
-        # win_chance у тебя в процентах по UI — держим 0..100
+        v = float(v)
         if v < 0:
             return 0.0
         if v > 100:
             return 100.0
-        return float(v)
+        return v
 
-    @field_validator("gen_level", "t_wallet_seconds", "t_seed_seconds", "minutes_in_app")
+    @field_validator(
+        "gen_level", "t_wallet_seconds", "t_seed_seconds", "minutes_in_app",
+        mode="before"
+    )
     @classmethod
     def non_negative_ints(cls, v):
         if v is None:
             return v
-        iv = int(v)
-        return max(0, iv)
+        return max(0, int(v))
+
+    @field_validator("bal_mmc", "bal_ton", "bal_usdt", "bal_stars", mode="before")
+    @classmethod
+    def parse_money(cls, v):
+        if v is None:
+            return v
+        # если прилетает "123,45" — исправим на "123.45"
+        if isinstance(v, str):
+            v = v.replace(",", ".").strip()
+        return float(v)
+
+
 
 # ---------------- Helpers ----------------
 def require_admin(x_api_key: str):
@@ -293,3 +312,4 @@ def admin_user_update(
     # вернём свежую строку — удобно админке
     r2 = get_user_row(body.user_id)
     return {"ok": True, "updated": True, "fields": list(fields.keys()), "user": dict(r2)}
+
