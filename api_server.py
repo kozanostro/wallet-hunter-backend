@@ -292,7 +292,7 @@ def admin_user_update(
     }
 
     fields: Dict[str, Any] = {}
-    dumped = body.model_dump()
+    dumped = body.model_dump(by_alias=False)
     for k, v in dumped.items():
         if k == "user_id":
             continue
@@ -312,4 +312,5 @@ def admin_user_update(
     # вернём свежую строку — удобно админке
     r2 = get_user_row(body.user_id)
     return {"ok": True, "updated": True, "fields": list(fields.keys()), "user": dict(r2)}
+
 
