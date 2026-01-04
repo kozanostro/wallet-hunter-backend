@@ -2,6 +2,9 @@ import os
 import time
 import sqlite3
 from typing import Optional, Dict, Any, List
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +17,30 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 MMMCOIN_TOTAL_SUPPLY = 30_000_000.0
 
 app = FastAPI(title="WalletHunter API", version="1.3")
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # пытаемся вытащить тело запроса (JSON или сырой текст)
+    try:
+        body = await request.json()
+    except Exception:
+        try:
+            body = (await request.body()).decode("utf-8", "replace")
+        except Exception:
+            body = "<cannot read body>"
+
+    # ЛОГ в консоль/journalctl
+    print("=== 422 VALIDATION ERROR ===")
+    print("URL:", request.url)
+    print("HEADERS Content-Type:", request.headers.get("content-type"))
+    print("BODY:", body)
+    print("ERRORS:", exc.errors())
+    print("============================")
+
+    # ответ клиенту тоже понятный
+    return JSONResponse(
+        status_code=422,
+        content={"ok": False, "detail": exc.errors(), "body": body},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -312,5 +339,6 @@ def admin_user_update(
     # вернём свежую строку — удобно админке
     r2 = get_user_row(body.user_id)
     return {"ok": True, "updated": True, "fields": list(fields.keys()), "user": dict(r2)}
+
 
 
