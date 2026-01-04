@@ -296,49 +296,136 @@ def admin_users(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key
     rows = [dict(r) for r in cur.fetchall()]
     return {"ok": True, "users": rows, "mmmcoin_total_supply": MMMCOIN_TOTAL_SUPPLY}
 
+from fastapi import Request
+
+def _to_float(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = v.strip()
+        if v == "":
+            return None
+        v = v.replace(",", ".")
+    return float(v)
+
+def _to_int(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = v.strip()
+        if v == "":
+            return None
+    return int(float(v))
+
+def _get(payload: dict, *keys, default=None):
+    for k in keys:
+        if k in payload:
+            return payload[k]
+    return default
+
 @app.post("/admin/user/update")
-def admin_user_update(
-    body: AdminUpdateBody,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
+async def admin_user_update(request: Request, x_api_key: str = Header(default="")):
     require_admin(x_api_key)
-    _ = get_user_row(body.user_id)
 
-    allowed_fields = {
-        "win_chance",
-        "gen_level",
-        "t_wallet_seconds",
-        "t_seed_seconds",
-        "bal_mmc",
-        "bal_ton",
-        "bal_usdt",
-        "bal_stars",
-        "wallet_address",
-        "wallet_status",
-        "minutes_in_app",
-    }
+    # 1) читаем тело (JSON или form)
+    payload = None
+    ct = (request.headers.get("content-type") or "").lower()
 
-    fields: Dict[str, Any] = {}
-    dumped = body.model_dump(by_alias=False)
-    for k, v in dumped.items():
-        if k == "user_id":
-            continue
-        if k in allowed_fields and v is not None:
-            fields[k] = v
+    if "application/json" in ct:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+
+    if payload is None:
+        # пробуем form-urlencoded / multipart
+        try:
+            form = await request.form()
+            payload = dict(form)
+        except Exception:
+            payload = None
+
+    if payload is None:
+        # как крайний случай — сырой текст
+        raw = (await request.body()).decode("utf-8", "replace")
+        raise HTTPException(status_code=422, detail=f"Bad body. Content-Type={ct}. Raw={raw[:200]}")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Body must be object/dict")
+
+    # 2) нормализуем user_id
+    user_id = _get(payload, "user_id", "userId")
+    if user_id is None:
+        raise HTTPException(status_code=422, detail="user_id is required")
+
+    try:
+        user_id = _to_int(user_id)
+    except Exception:
+        raise HTTPException(status_code=422, detail="user_id must be int")
+
+    _ = get_user_row(user_id)  # 404 если юзера нет
+
+    # 3) собираем поля на обновление (поддерживаем snake и camel)
+    fields = {}
+
+    # прогресс/таймеры
+    win = _get(payload, "win_chance", "winChance")
+    if win is not None:
+        w = _to_float(win)
+        if w < 0: w = 0.0
+        if w > 100: w = 100.0
+        fields["win_chance"] = w
+
+    gen = _get(payload, "gen_level", "genLevel")
+    if gen is not None:
+        fields["gen_level"] = max(0, _to_int(gen))
+
+    tw = _get(payload, "t_wallet_seconds", "tWalletSeconds")
+    if tw is not None:
+        fields["t_wallet_seconds"] = max(0, _to_int(tw))
+
+    ts = _get(payload, "t_seed_seconds", "tSeedSeconds")
+    if ts is not None:
+        fields["t_seed_seconds"] = max(0, _to_int(ts))
+
+    # балансы
+    for snake, camel in [
+        ("bal_mmc", "balMmc"),
+        ("bal_ton", "balTon"),
+        ("bal_usdt", "balUsdt"),
+        ("bal_stars", "balStars"),
+    ]:
+        v = _get(payload, snake, camel)
+        if v is not None:
+            fields[snake] = _to_float(v)
+
+    # wallet/info
+    wa = _get(payload, "wallet_address", "walletAddress")
+    if wa is not None:
+        fields["wallet_address"] = str(wa)
+
+    ws = _get(payload, "wallet_status", "walletStatus")
+    if ws is not None:
+        fields["wallet_status"] = str(ws)
+
+    mia = _get(payload, "minutes_in_app", "minutesInApp")
+    if mia is not None:
+        fields["minutes_in_app"] = max(0, _to_int(mia))
 
     if not fields:
         return {"ok": True, "updated": False, "reason": "no fields"}
 
+    # 4) апдейт в БД
     sets = ", ".join([f"{k}=?" for k in fields.keys()])
-    vals = list(fields.values()) + [body.user_id]
+    vals = list(fields.values()) + [user_id]
 
     cur = conn.cursor()
     cur.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
     conn.commit()
 
-    # вернём свежую строку — удобно админке
-    r2 = get_user_row(body.user_id)
-    return {"ok": True, "updated": True, "fields": list(fields.keys()), "user": dict(r2)}
+    return {"ok": True, "updated": True, "user_id": user_id, "fields": list(fields.keys())}
+
+
 
 
 
