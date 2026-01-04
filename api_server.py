@@ -1,15 +1,11 @@
 import os
 import time
 import sqlite3
-from typing import Optional, Dict, Any, List
-from fastapi import Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field
 
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
@@ -17,30 +13,6 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 MMMCOIN_TOTAL_SUPPLY = 30_000_000.0
 
 app = FastAPI(title="WalletHunter API", version="1.3")
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # пытаемся вытащить тело запроса (JSON или сырой текст)
-    try:
-        body = await request.json()
-    except Exception:
-        try:
-            body = (await request.body()).decode("utf-8", "replace")
-        except Exception:
-            body = "<cannot read body>"
-
-    # ЛОГ в консоль/journalctl
-    print("=== 422 VALIDATION ERROR ===")
-    print("URL:", request.url)
-    print("HEADERS Content-Type:", request.headers.get("content-type"))
-    print("BODY:", body)
-    print("ERRORS:", exc.errors())
-    print("============================")
-
-    # ответ клиенту тоже понятный
-    return JSONResponse(
-        status_code=422,
-        content={"ok": False, "detail": exc.errors(), "body": body},
-    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,14 +78,6 @@ def ensure_user_columns():
         add("t_wallet_seconds INTEGER DEFAULT 0")
     if "t_seed_seconds" not in existing:
         add("t_seed_seconds INTEGER DEFAULT 900")
-    if "bal_mmc" not in existing:
-        add("bal_mmc REAL DEFAULT 0")
-    if "bal_ton" not in existing:
-        add("bal_ton REAL DEFAULT 0")
-    if "bal_usdt" not in existing:
-        add("bal_usdt REAL DEFAULT 0")
-    if "bal_stars" not in existing:
-        add("bal_stars REAL DEFAULT 0")
 
     conn.commit()
 
@@ -137,60 +101,22 @@ class EventBody(BaseModel):
     wallet_address: Optional[str] = ""
     wallet_status: Optional[str] = ""
 
-
 class AdminUpdateBody(BaseModel):
-    # разрешаем принимать и snake_case и camelCase
-    model_config = ConfigDict(populate_by_name=True)
+    user_id: int
 
-    user_id: int = Field(..., alias="userId")
+    win_chance: Optional[float] = None
+    gen_level: Optional[int] = None
+    t_wallet_seconds: Optional[int] = None
+    t_seed_seconds: Optional[int] = None
 
-    win_chance: Optional[float] = Field(default=None, alias="winChance")
-    gen_level: Optional[int] = Field(default=None, alias="genLevel")
-    t_wallet_seconds: Optional[int] = Field(default=None, alias="tWalletSeconds")
-    t_seed_seconds: Optional[int] = Field(default=None, alias="tSeedSeconds")
+    bal_mmc: Optional[float] = None
+    bal_ton: Optional[float] = None
+    bal_usdt: Optional[float] = None
+    bal_stars: Optional[float] = None
 
-    bal_mmc: Optional[float] = Field(default=None, alias="balMmc")
-    bal_ton: Optional[float] = Field(default=None, alias="balTon")
-    bal_usdt: Optional[float] = Field(default=None, alias="balUsdt")
-    bal_stars: Optional[float] = Field(default=None, alias="balStars")
-
-    wallet_address: Optional[str] = Field(default=None, alias="walletAddress")
-    wallet_status: Optional[str] = Field(default=None, alias="walletStatus")
-    minutes_in_app: Optional[int] = Field(default=None, alias="minutesInApp")
-
-    @field_validator("win_chance")
-    @classmethod
-    def clamp_win(cls, v):
-        if v is None:
-            return v
-        v = float(v)
-        if v < 0:
-            return 0.0
-        if v > 100:
-            return 100.0
-        return v
-
-    @field_validator(
-        "gen_level", "t_wallet_seconds", "t_seed_seconds", "minutes_in_app",
-        mode="before"
-    )
-    @classmethod
-    def non_negative_ints(cls, v):
-        if v is None:
-            return v
-        return max(0, int(v))
-
-    @field_validator("bal_mmc", "bal_ton", "bal_usdt", "bal_stars", mode="before")
-    @classmethod
-    def parse_money(cls, v):
-        if v is None:
-            return v
-        # если прилетает "123,45" — исправим на "123.45"
-        if isinstance(v, str):
-            v = v.replace(",", ".").strip()
-        return float(v)
-
-
+    wallet_address: Optional[str] = None
+    wallet_status: Optional[str] = None
+    minutes_in_app: Optional[int] = None
 
 # ---------------- Helpers ----------------
 def require_admin(x_api_key: str):
@@ -216,7 +142,6 @@ def upsert_user(p: PingBody):
                SET username=?, first_name=?, last_name=?, language=?, last_seen=?
              WHERE user_id=?
         """, (p.username or "", p.first_name or "", p.last_name or "", p.language or "", now, p.user_id))
-
     conn.commit()
 
 def get_user_row(user_id: int) -> sqlite3.Row:
@@ -227,10 +152,20 @@ def get_user_row(user_id: int) -> sqlite3.Row:
         raise HTTPException(status_code=404, detail="User not found")
     return r
 
-def row_to_public_dict(r: sqlite3.Row) -> Dict[str, Any]:
-    d = dict(r)
-    # sqlite3.Row -> dict already ok
-    return d
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(v)))
+
+def _safe_float(v: Any) -> float:
+    try:
+        return float(v)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"Invalid float: {v}")
+
+def _safe_int(v: Any) -> int:
+    try:
+        return int(v)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"Invalid int: {v}")
 
 # ---------------- Routes ----------------
 @app.get("/health")
@@ -270,17 +205,16 @@ def event(body: EventBody):
         cur.execute("UPDATE users SET minutes_in_app=? WHERE user_id=?", (new_minutes, body.user_id))
 
     if body.wallet_address is not None and body.wallet_address != "":
-        cur.execute("UPDATE users SET wallet_address=? WHERE user_id=?", (body.wallet_address, body.user_id))
+        cur.execute("UPDATE users SET wallet_address=? WHERE user_id=?", (str(body.wallet_address), body.user_id))
+
     if body.wallet_status is not None and body.wallet_status != "":
-        cur.execute("UPDATE users SET wallet_status=? WHERE user_id=?", (body.wallet_status, body.user_id))
+        cur.execute("UPDATE users SET wallet_status=? WHERE user_id=?", (str(body.wallet_status), body.user_id))
 
     conn.commit()
     return {"ok": True}
 
-# --- ADMIN ---
-# ВАЖНО: alias="X-API-Key" чтобы совпадало с тем, что шлёт админка/curл
 @app.get("/admin/users")
-def admin_users(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def admin_users(x_api_key: str = Header(default="", alias="X-API-Key")):
     require_admin(x_api_key)
 
     cur = conn.cursor()
@@ -296,136 +230,54 @@ def admin_users(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key
     rows = [dict(r) for r in cur.fetchall()]
     return {"ok": True, "users": rows, "mmmcoin_total_supply": MMMCOIN_TOTAL_SUPPLY}
 
-from fastapi import Request
-
-def _to_float(v):
-    if v is None:
-        return None
-    if isinstance(v, str):
-        v = v.strip()
-        if v == "":
-            return None
-        v = v.replace(",", ".")
-    return float(v)
-
-def _to_int(v):
-    if v is None:
-        return None
-    if isinstance(v, str):
-        v = v.strip()
-        if v == "":
-            return None
-    return int(float(v))
-
-def _get(payload: dict, *keys, default=None):
-    for k in keys:
-        if k in payload:
-            return payload[k]
-    return default
-
 @app.post("/admin/user/update")
-async def admin_user_update(request: Request, x_api_key: str = Header(default="")):
+def admin_user_update(body: AdminUpdateBody, x_api_key: str = Header(default="", alias="X-API-Key")):
     require_admin(x_api_key)
+    _ = get_user_row(body.user_id)
 
-    # 1) читаем тело (JSON или form)
-    payload = None
-    ct = (request.headers.get("content-type") or "").lower()
+    raw = body.model_dump()
 
-    if "application/json" in ct:
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = None
+    fields: Dict[str, Any] = {}
+    for k, v in raw.items():
+        if k == "user_id" or v is None:
+            continue
 
-    if payload is None:
-        # пробуем form-urlencoded / multipart
-        try:
-            form = await request.form()
-            payload = dict(form)
-        except Exception:
-            payload = None
+        # нормализация типов (чтобы не ловить “странные” значения)
+        if k in ("gen_level", "t_wallet_seconds", "t_seed_seconds", "minutes_in_app"):
+            vv = _safe_int(v)
+            if k == "gen_level":
+                vv = _clamp_int(vv, 0, 999)
+            if k in ("t_wallet_seconds", "t_seed_seconds"):
+                vv = _clamp_int(vv, 0, 60 * 60 * 24 * 365)  # до года
+            if k == "minutes_in_app":
+                vv = _clamp_int(vv, 0, 10**9)
+            fields[k] = vv
+            continue
 
-    if payload is None:
-        # как крайний случай — сырой текст
-        raw = (await request.body()).decode("utf-8", "replace")
-        raise HTTPException(status_code=422, detail=f"Bad body. Content-Type={ct}. Raw={raw[:200]}")
+        if k in ("win_chance", "bal_mmc", "bal_ton", "bal_usdt", "bal_stars"):
+            vv = _safe_float(v)
+            fields[k] = vv
+            continue
 
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="Body must be object/dict")
+        if k in ("wallet_status", "wallet_address"):
+            vv = str(v).strip()
+            # пустое не пишем
+            if vv != "":
+                fields[k] = vv
+            continue
 
-    # 2) нормализуем user_id
-    user_id = _get(payload, "user_id", "userId")
-    if user_id is None:
-        raise HTTPException(status_code=422, detail="user_id is required")
-
-    try:
-        user_id = _to_int(user_id)
-    except Exception:
-        raise HTTPException(status_code=422, detail="user_id must be int")
-
-    _ = get_user_row(user_id)  # 404 если юзера нет
-
-    # 3) собираем поля на обновление (поддерживаем snake и camel)
-    fields = {}
-
-    # прогресс/таймеры
-    win = _get(payload, "win_chance", "winChance")
-    if win is not None:
-        w = _to_float(win)
-        if w < 0: w = 0.0
-        if w > 100: w = 100.0
-        fields["win_chance"] = w
-
-    gen = _get(payload, "gen_level", "genLevel")
-    if gen is not None:
-        fields["gen_level"] = max(0, _to_int(gen))
-
-    tw = _get(payload, "t_wallet_seconds", "tWalletSeconds")
-    if tw is not None:
-        fields["t_wallet_seconds"] = max(0, _to_int(tw))
-
-    ts = _get(payload, "t_seed_seconds", "tSeedSeconds")
-    if ts is not None:
-        fields["t_seed_seconds"] = max(0, _to_int(ts))
-
-    # балансы
-    for snake, camel in [
-        ("bal_mmc", "balMmc"),
-        ("bal_ton", "balTon"),
-        ("bal_usdt", "balUsdt"),
-        ("bal_stars", "balStars"),
-    ]:
-        v = _get(payload, snake, camel)
-        if v is not None:
-            fields[snake] = _to_float(v)
-
-    # wallet/info
-    wa = _get(payload, "wallet_address", "walletAddress")
-    if wa is not None:
-        fields["wallet_address"] = str(wa)
-
-    ws = _get(payload, "wallet_status", "walletStatus")
-    if ws is not None:
-        fields["wallet_status"] = str(ws)
-
-    mia = _get(payload, "minutes_in_app", "minutesInApp")
-    if mia is not None:
-        fields["minutes_in_app"] = max(0, _to_int(mia))
+        # на всякий — неизвестные поля отсекаем
+        # (если понадобится расширить — добавим явно)
+        # fields[k] = v
 
     if not fields:
-        return {"ok": True, "updated": False, "reason": "no fields"}
+        return {"ok": True, "updated": False, "reason": "no_valid_fields"}
 
-    # 4) апдейт в БД
     sets = ", ".join([f"{k}=?" for k in fields.keys()])
-    vals = list(fields.values()) + [user_id]
+    vals = list(fields.values()) + [body.user_id]
 
     cur = conn.cursor()
     cur.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
     conn.commit()
 
-    return {"ok": True, "updated": True, "user_id": user_id, "fields": list(fields.keys())}
-
-
-
-
-
+    return {"ok": True, "updated": True, "fields": list(fields.keys())}
