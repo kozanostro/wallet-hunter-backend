@@ -1,24 +1,22 @@
 import os
 import time
 import sqlite3
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 
 MMMCOIN_TOTAL_SUPPLY = 30_000_000.0
 
-app = FastAPI(title="WalletHunter API", version="1.2")
+app = FastAPI(title="WalletHunter API", version="1.3")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://kozanostro.github.io",
-    ],
+    allow_origins=["https://kozanostro.github.io"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,7 +68,6 @@ def ensure_user_columns():
     def add(col_sql: str):
         cur.execute(f"ALTER TABLE users ADD COLUMN {col_sql}")
 
-    # добавляем недостающие, если база старая
     if "minutes_in_app" not in existing:
         add("minutes_in_app INTEGER DEFAULT 0")
     if "wallet_status" not in existing:
@@ -81,6 +78,14 @@ def ensure_user_columns():
         add("t_wallet_seconds INTEGER DEFAULT 0")
     if "t_seed_seconds" not in existing:
         add("t_seed_seconds INTEGER DEFAULT 900")
+    if "bal_mmc" not in existing:
+        add("bal_mmc REAL DEFAULT 0")
+    if "bal_ton" not in existing:
+        add("bal_ton REAL DEFAULT 0")
+    if "bal_usdt" not in existing:
+        add("bal_usdt REAL DEFAULT 0")
+    if "bal_stars" not in existing:
+        add("bal_stars REAL DEFAULT 0")
 
     conn.commit()
 
@@ -100,12 +105,13 @@ class EventBody(BaseModel):
     user_id: int
     event: str = Field(..., description="open|phase_wallet_start|phase_wallet_done|phase_seed_start|phase_seed_done|close")
     phase: Optional[str] = ""
-    minutes_delta: Optional[int] = 0  # прибавка минут (когда закрыли)
+    minutes_delta: Optional[int] = 0
     wallet_address: Optional[str] = ""
     wallet_status: Optional[str] = ""
 
 class AdminUpdateBody(BaseModel):
     user_id: int
+
     win_chance: Optional[float] = None
     gen_level: Optional[int] = None
     t_wallet_seconds: Optional[int] = None
@@ -119,6 +125,26 @@ class AdminUpdateBody(BaseModel):
     wallet_address: Optional[str] = None
     wallet_status: Optional[str] = None
     minutes_in_app: Optional[int] = None
+
+    @field_validator("win_chance")
+    @classmethod
+    def clamp_win(cls, v):
+        if v is None:
+            return v
+        # win_chance у тебя в процентах по UI — держим 0..100
+        if v < 0:
+            return 0.0
+        if v > 100:
+            return 100.0
+        return float(v)
+
+    @field_validator("gen_level", "t_wallet_seconds", "t_seed_seconds", "minutes_in_app")
+    @classmethod
+    def non_negative_ints(cls, v):
+        if v is None:
+            return v
+        iv = int(v)
+        return max(0, iv)
 
 # ---------------- Helpers ----------------
 def require_admin(x_api_key: str):
@@ -155,6 +181,11 @@ def get_user_row(user_id: int) -> sqlite3.Row:
         raise HTTPException(status_code=404, detail="User not found")
     return r
 
+def row_to_public_dict(r: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(r)
+    # sqlite3.Row -> dict already ok
+    return d
+
 # ---------------- Routes ----------------
 @app.get("/health")
 def health():
@@ -168,7 +199,6 @@ def ping(body: PingBody):
 @app.get("/config")
 def config(user_id: int):
     r = get_user_row(user_id)
-    # отдаем настройки для игры (секунды) + коэффициенты
     return {
         "ok": True,
         "user_id": r["user_id"],
@@ -183,20 +213,16 @@ def config(user_id: int):
 
 @app.post("/event")
 def event(body: EventBody):
-    # логирование/учет времени в приложении
     r = get_user_row(body.user_id)
     cur = conn.cursor()
 
-    # обновим last_seen
     now = int(time.time())
     cur.execute("UPDATE users SET last_seen=? WHERE user_id=?", (now, body.user_id))
 
-    # учёт минут
     if body.minutes_delta and body.minutes_delta > 0:
         new_minutes = int(r["minutes_in_app"] or 0) + int(body.minutes_delta)
         cur.execute("UPDATE users SET minutes_in_app=? WHERE user_id=?", (new_minutes, body.user_id))
 
-    # обновление статуса/адреса (если прислали)
     if body.wallet_address is not None and body.wallet_address != "":
         cur.execute("UPDATE users SET wallet_address=? WHERE user_id=?", (body.wallet_address, body.user_id))
     if body.wallet_status is not None and body.wallet_status != "":
@@ -205,8 +231,10 @@ def event(body: EventBody):
     conn.commit()
     return {"ok": True}
 
+# --- ADMIN ---
+# ВАЖНО: alias="X-API-Key" чтобы совпадало с тем, что шлёт админка/curл
 @app.get("/admin/users")
-def admin_users(x_api_key: str = Header(default="")):
+def admin_users(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
     require_admin(x_api_key)
 
     cur = conn.cursor()
@@ -223,19 +251,37 @@ def admin_users(x_api_key: str = Header(default="")):
     return {"ok": True, "users": rows, "mmmcoin_total_supply": MMMCOIN_TOTAL_SUPPLY}
 
 @app.post("/admin/user/update")
-def admin_user_update(body: AdminUpdateBody, x_api_key: str = Header(default="")):
+def admin_user_update(
+    body: AdminUpdateBody,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
     require_admin(x_api_key)
     _ = get_user_row(body.user_id)
 
+    allowed_fields = {
+        "win_chance",
+        "gen_level",
+        "t_wallet_seconds",
+        "t_seed_seconds",
+        "bal_mmc",
+        "bal_ton",
+        "bal_usdt",
+        "bal_stars",
+        "wallet_address",
+        "wallet_status",
+        "minutes_in_app",
+    }
+
     fields: Dict[str, Any] = {}
-    for k, v in body.model_dump().items():
+    dumped = body.model_dump()
+    for k, v in dumped.items():
         if k == "user_id":
             continue
-        if v is not None:
+        if k in allowed_fields and v is not None:
             fields[k] = v
 
     if not fields:
-        return {"ok": True, "updated": False}
+        return {"ok": True, "updated": False, "reason": "no fields"}
 
     sets = ", ".join([f"{k}=?" for k in fields.keys()])
     vals = list(fields.values()) + [body.user_id]
@@ -243,4 +289,7 @@ def admin_user_update(body: AdminUpdateBody, x_api_key: str = Header(default="")
     cur = conn.cursor()
     cur.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
     conn.commit()
-    return {"ok": True, "updated": True, "fields": list(fields.keys())}
+
+    # вернём свежую строку — удобно админке
+    r2 = get_user_row(body.user_id)
+    return {"ok": True, "updated": True, "fields": list(fields.keys()), "user": dict(r2)}
