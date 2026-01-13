@@ -131,15 +131,15 @@ def is_admin(user_id: int) -> bool:
 # ===================== UI =====================
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🎮 Игры", "👤 Кабинет")
+    kb.row("🎮 Игры", "🔍 Wallet Hunter")
     kb.row("💎 Стейкинг", "📩 Обратная связь")
     return kb
+
 
 
 def games_menu():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🁫 Domino (Mini App)", web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)))
-    kb.add(types.InlineKeyboardButton("🧩 WalletHunter (Mini App)", web_app=types.WebAppInfo(url=WALLETHUNTER_WEBAPP_URL)))
     kb.add(types.InlineKeyboardButton("💥 Smash (скоро)", callback_data="game_smash"))
     return kb
 
@@ -221,12 +221,30 @@ def myid(message):
 def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
-
-
-@bot.message_handler(func=lambda m: m.text == "👤 Кабинет")
-def on_cabinet(message):
+@bot.message_handler(func=lambda m: m.text == "🔍 Wallet Hunter")
+def on_wallet_hunter(message):
     upsert_user(message.from_user)
-    bot.send_message(message.chat.id, "Выбери кабинет:", reply_markup=cabinet_menu())
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton(
+            "▶️ Запустить Wallet Hunter",
+            web_app=types.WebAppInfo(
+                url="https://kozanostro.github.io/wallet-hunter-miniapp/?wallet=ton"
+            )
+        )
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "🔍 Wallet Hunter\n\n"
+        "Система анализа TON-кошельков.\n"
+        "Это не игра. Процесс идёт в фоновом режиме.",
+        reply_markup=kb
+    )
+
+
+
 
 
 @bot.message_handler(func=lambda m: m.text == "💎 Стейкинг")
@@ -441,3 +459,4 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
