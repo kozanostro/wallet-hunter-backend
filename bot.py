@@ -236,7 +236,9 @@ def on_feedback_text(message):
 @bot.message_handler(commands=["start"])
 def start(message):
     upsert_user(message.from_user)
+    bot.send_message(message.chat.id, "Обновляю меню…", reply_markup=types.ReplyKeyboardRemove())
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
+
 
 
 @bot.message_handler(commands=["myid"])
@@ -250,7 +252,8 @@ def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
 
-@bot.message_handler(func=lambda m: (m.text or "").strip().lower() == "wallet hunter")
+
+@bot.message_handler(func=lambda m: (m.text or "").strip().lower() in ["wallet hunter", "🔍 wallet hunter"])
 def on_wallet_hunter(message):
     upsert_user(message.from_user)
 
@@ -260,11 +263,8 @@ def on_wallet_hunter(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("▶️ Запустить Wallet Hunter", web_app=types.WebAppInfo(url=url)))
 
-    bot.send_message(
-        message.chat.id,
-        "🔍 Wallet Hunter\n\nTON Wallet Scan.\nЗапусти мини-апп для начала процесса.",
-        reply_markup=kb
-    )
+    bot.send_message(message.chat.id, "Запускаю Wallet Hunter:", reply_markup=kb)
+
 
 
 
@@ -483,5 +483,6 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
 
 
