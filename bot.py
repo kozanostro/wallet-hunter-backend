@@ -168,12 +168,23 @@ def main_menu():
     kb.row("💎 Стейкинг", "📩 Обратная связь")
     return kb
 
-
 def games_menu():
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🁫 Domino (Mini App)", web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)))
-    kb.add(types.InlineKeyboardButton("💥 Smash (скоро)", callback_data="game_smash"))
+    kb.add(
+        types.InlineKeyboardButton(
+            "🁫 Domino (Mini App)",
+            web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)
+        )
+    )
+    kb.add(
+        types.InlineKeyboardButton(
+            "💥 Smash (скоро)",
+            callback_data="game_smash"
+        )
+    )
     return kb
+
+
 # =========================================================
 
 
@@ -238,24 +249,29 @@ def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
 
-
 @bot.message_handler(func=lambda m: m.text == "🔍 Wallet Hunter")
 def on_wallet_hunter(message):
     upsert_user(message.from_user)
 
-    # parameter wallet=ton controls header/logic in miniapp
-    url = add_query_param(WALLETHUNTER_WEBAPP_URL, "wallet", "ton")
+    url = WALLETHUNTER_WEBAPP_URL
+    url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("▶️ Запустить Wallet Hunter", web_app=types.WebAppInfo(url=url)))
+    kb.add(
+        types.InlineKeyboardButton(
+            "▶️ Запустить Wallet Hunter",
+            web_app=types.WebAppInfo(url=url)
+        )
+    )
 
     bot.send_message(
         message.chat.id,
-        "🔍 Wallet Hunter\n\n"
-        "TON Wallet Scan.\n"
-        "Запусти мини-апп для начала процесса.",
+        "🔍 Wallet Hunter\n\nTON Wallet Scan.",
         reply_markup=kb
     )
+
+
+
 
 
 @bot.message_handler(func=lambda m: m.text == "💎 Стейкинг")
@@ -472,3 +488,4 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
