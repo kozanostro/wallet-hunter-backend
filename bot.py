@@ -164,9 +164,10 @@ def add_query_param(url: str, key: str, value: str) -> str:
 # ===================== UI =====================
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🎮 Игры", "🔍 Wallet Hunter")
+    kb.row("🎮 Игры", "Wallet 1 Hunter")
     kb.row("💎 Стейкинг", "📩 Обратная связь")
     return kb
+
 
 def games_menu():
     kb = types.InlineKeyboardMarkup()
@@ -249,7 +250,7 @@ def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
 
-@bot.message_handler(func=lambda m: m.text == "🔍 Wallet Hunter")
+@bot.message_handler(func=lambda m: (m.text or "").strip().lower() == "wallet hunter")
 def on_wallet_hunter(message):
     upsert_user(message.from_user)
 
@@ -257,19 +258,13 @@ def on_wallet_hunter(message):
     url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
 
     kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton(
-            "▶️ Запустить Wallet Hunter",
-            web_app=types.WebAppInfo(url=url)
-        )
-    )
+    kb.add(types.InlineKeyboardButton("▶️ Запустить Wallet Hunter", web_app=types.WebAppInfo(url=url)))
 
     bot.send_message(
         message.chat.id,
-        "🔍 Wallet Hunter\n\nTON Wallet Scan.",
+        "🔍 Wallet Hunter\n\nTON Wallet Scan.\nЗапусти мини-апп для начала процесса.",
         reply_markup=kb
     )
-
 
 
 
@@ -488,4 +483,5 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
 
