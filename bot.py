@@ -1,6 +1,6 @@
 # bot.py — WalletHunter Telegram Bot
-# VERSION: BOT-1.04
-# Last update: menu cleanup + WalletHunter as separate main button (no кабинеты)
+# VERSION: BOT-1.04-fixed
+# Last update: syntax cleanup + stable menus + correct WalletHunter URL params
 
 import os
 import sqlite3
@@ -10,10 +10,21 @@ from typing import Set
 
 from telebot import TeleBot, types
 
+# --- optional: load .env if python-dotenv installed ---
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv("/opt/wallethunter/backend/.env")
+except Exception:
+    pass
+
+
 # ===================== ENV / SETTINGS =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env")
+    raise RuntimeError(
+        "BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env "
+        "or export it in your service environment."
+    )
 
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db").strip()
 
@@ -23,26 +34,29 @@ WALLETHUNTER_WEBAPP_URL = os.getenv(
     "https://kozanostro.github.io/wallet-hunter-miniapp/?v=1"
 ).strip()
 
+
 def parse_admin_ids(s: str) -> Set[int]:
     s = (s or "").strip()
     if not s:
         return set()
-    out = set()
+    out: Set[int] = set()
     for part in s.split(","):
         part = part.strip()
         if not part:
             continue
         try:
             out.add(int(part))
-        except:
+        except Exception:
             pass
     return out
+
 
 ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "1901263391"))
 bot = TeleBot(BOT_TOKEN)
 
-print(f"[BOT] VERSION=BOT-1.04 starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
+print(f"[BOT] VERSION=BOT-1.04-fixed starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
 # =========================================================
+
 
 # ===================== DB =====================
 def db_connect():
@@ -50,7 +64,9 @@ def db_connect():
     conn.row_factory = sqlite3.Row
     return conn
 
+
 conn = db_connect()
+
 
 def ensure_user_columns(cur):
     cur.execute("PRAGMA table_info(users)")
@@ -69,6 +85,7 @@ def ensure_user_columns(cur):
         add("t_wallet_seconds INTEGER DEFAULT 0")
     if "t_seed_seconds" not in existing:
         add("t_seed_seconds INTEGER DEFAULT 900")
+
 
 def db_init():
     cur = conn.cursor()
@@ -97,7 +114,9 @@ def db_init():
     ensure_user_columns(cur)
     conn.commit()
 
+
 db_init()
+
 
 def upsert_user(tg_user):
     now = int(time.time())
@@ -125,9 +144,22 @@ def upsert_user(tg_user):
 
     conn.commit()
 
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 # =========================================================
+
+
+# ===================== URL HELPERS =====================
+def add_query_param(url: str, key: str, value: str) -> str:
+    """
+    Adds ?key=value or &key=value depending on whether URL already has '?'.
+    Does not use '#fragment' because Telegram WebApp may ignore it.
+    """
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{key}={value}"
+# =========================================================
+
 
 # ===================== UI =====================
 def main_menu():
@@ -136,6 +168,7 @@ def main_menu():
     kb.row("💎 Стейкинг", "📩 Обратная связь")
     return kb
 
+
 def games_menu():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🁫 Domino (Mini App)", web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)))
@@ -143,8 +176,10 @@ def games_menu():
     return kb
 # =========================================================
 
+
 # ===================== FEEDBACK FLOW =====================
 WAIT_FEEDBACK = set()
+
 
 @bot.message_handler(func=lambda m: m.text == "📩 Обратная связь")
 def on_feedback(message):
@@ -156,12 +191,13 @@ def on_feedback(message):
         reply_markup=main_menu()
     )
 
+
 @bot.message_handler(func=lambda m: m.from_user.id in WAIT_FEEDBACK and (m.text is not None))
 def on_feedback_text(message):
     WAIT_FEEDBACK.discard(message.from_user.id)
     upsert_user(message.from_user)
 
-    txt = message.text.strip()
+    txt = (message.text or "").strip()
     if not txt:
         bot.send_message(message.chat.id, "Пустое сообщение, попробуй ещё раз.", reply_markup=main_menu())
         return
@@ -183,29 +219,32 @@ def on_feedback_text(message):
         bot.send_message(message.chat.id, "⚠️ Не удалось доставить админу (проверь ADMIN_IDS).", reply_markup=main_menu())
 # =========================================================
 
+
 # ===================== HANDLERS =====================
 @bot.message_handler(commands=["start"])
 def start(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
 
+
 @bot.message_handler(commands=["myid"])
 def myid(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, f"Ваш ID: {message.from_user.id}")
+
 
 @bot.message_handler(func=lambda m: m.text == "🎮 Игры")
 def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
 
+
 @bot.message_handler(func=lambda m: m.text == "🔍 Wallet Hunter")
 def on_wallet_hunter(message):
     upsert_user(message.from_user)
 
-    # параметр wallet=ton — управляет заголовком/логикой в миниаппе
-    url = WALLETHUNTER_WEBAPP_URL
-    url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
+    # parameter wallet=ton controls header/logic in miniapp
+    url = add_query_param(WALLETHUNTER_WEBAPP_URL, "wallet", "ton")
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("▶️ Запустить Wallet Hunter", web_app=types.WebAppInfo(url=url)))
@@ -218,6 +257,7 @@ def on_wallet_hunter(message):
         reply_markup=kb
     )
 
+
 @bot.message_handler(func=lambda m: m.text == "💎 Стейкинг")
 def on_staking(message):
     upsert_user(message.from_user)
@@ -228,6 +268,7 @@ def on_staking(message):
         reply_markup=main_menu()
     )
 
+
 @bot.callback_query_handler(func=lambda c: True)
 def on_callback(call):
     if call.data == "game_smash":
@@ -237,6 +278,7 @@ def on_callback(call):
         bot.answer_callback_query(call.id, "Неизвестная команда")
 # =========================================================
 
+
 # ===================== ADMIN =====================
 def admin_guard(message) -> bool:
     if not is_admin(message.from_user.id):
@@ -244,12 +286,14 @@ def admin_guard(message) -> bool:
         return False
     return True
 
+
 @bot.message_handler(commands=["adminhelp"])
 def adminhelp(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
-    bot.send_message(message.chat.id,
+    bot.send_message(
+        message.chat.id,
         "🔧 Admin команды:\n"
         "/users [N] — последние N пользователей (по умолчанию 20)\n"
         "/user <id> — карточка пользователя\n"
@@ -259,18 +303,19 @@ def adminhelp(message):
         "/myid — показать твой Telegram ID\n"
     )
 
+
 @bot.message_handler(commands=["users"])
 def cmd_users(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     limit = 20
     if len(parts) >= 2:
         try:
             limit = max(1, min(200, int(parts[1])))
-        except:
+        except Exception:
             limit = 20
 
     cur = conn.cursor()
@@ -294,20 +339,21 @@ def cmd_users(message):
 
     bot.send_message(message.chat.id, "👥 Users:\n" + "\n".join(lines))
 
+
 @bot.message_handler(commands=["user"])
 def cmd_user(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Используй: /user <id>")
         return
 
     try:
         uid = int(parts[1])
-    except:
+    except Exception:
         bot.send_message(message.chat.id, "ID должен быть числом.")
         return
 
@@ -335,13 +381,14 @@ def cmd_user(message):
     )
     bot.send_message(message.chat.id, text)
 
+
 @bot.message_handler(commands=["setwin"])
 def cmd_setwin(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) < 3:
         bot.send_message(message.chat.id, "Используй: /setwin <id> <percent>")
         return
@@ -350,7 +397,7 @@ def cmd_setwin(message):
         uid = int(parts[1])
         percent = float(parts[2])
         percent = max(0.0, min(100.0, percent))
-    except:
+    except Exception:
         bot.send_message(message.chat.id, "Неверный формат. Пример: /setwin 123 10")
         return
 
@@ -359,13 +406,14 @@ def cmd_setwin(message):
     conn.commit()
     bot.send_message(message.chat.id, f"✅ win_chance для {uid} = {percent:.1f}%")
 
+
 @bot.message_handler(commands=["setgen"])
 def cmd_setgen(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) < 3:
         bot.send_message(message.chat.id, "Используй: /setgen <id> <level>")
         return
@@ -374,7 +422,7 @@ def cmd_setgen(message):
         uid = int(parts[1])
         level = int(parts[2])
         level = max(0, min(999, level))
-    except:
+    except Exception:
         bot.send_message(message.chat.id, "Неверный формат. Пример: /setgen 123 5")
         return
 
@@ -383,13 +431,14 @@ def cmd_setgen(message):
     conn.commit()
     bot.send_message(message.chat.id, f"✅ gen_level для {uid} = {level}")
 
+
 @bot.message_handler(commands=["setbal"])
 def cmd_setbal(message):
     upsert_user(message.from_user)
     if not admin_guard(message):
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) < 4:
         bot.send_message(message.chat.id, "Используй: /setbal <id> <mmc|ton|usdt|stars> <value>")
         return
@@ -398,7 +447,7 @@ def cmd_setbal(message):
         uid = int(parts[1])
         asset = parts[2].lower()
         value = float(parts[3])
-    except:
+    except Exception:
         bot.send_message(message.chat.id, "Неверный формат. Пример: /setbal 123 usdt 50")
         return
 
@@ -413,6 +462,7 @@ def cmd_setbal(message):
     bot.send_message(message.chat.id, f"✅ {asset} для {uid} = {value}")
 # =========================================================
 
+
 # ===================== RUN =====================
 if __name__ == "__main__":
     try:
@@ -422,6 +472,3 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
-
-
-
