@@ -1,6 +1,9 @@
 # bot.py — WalletHunter Telegram Bot
-# VERSION: BOT-1.06 (stable clean)
-# Goal: Wallet Hunter as separate MAIN button (opens WebApp), Games contain only Domino+Smash.
+# VERSION: BOT-1.06 (stable, single-source-of-truth)
+# Goal:
+# - Wallet Hunter = отдельная кнопка в Главном меню (ReplyKeyboard)
+# - Игры = только Domino + Smash
+# - Wallet Hunter открывается через Inline-кнопку (WebApp)
 
 import os
 import sqlite3
@@ -17,42 +20,15 @@ try:
 except Exception:
     pass
 
-
 # ===================== ENV / SETTINGS =====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env")
 
-DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db").strip()
+DB_PATH = (os.getenv("DB_PATH") or "/opt/wallethunter/backend/bot.db").strip()
 
-DOMINO_WEBAPP_URL = os.getenv("DOMINO_WEBAPP_URL", "https://kozanostro.github.io/miniapp/").strip()
-WALLETHUNTER_WEBAPP_URL = os.getenv("WALLETHUNTER_WEBAPP_URL", "https://kozanostro.github.io/wallet-hunter-miniapp/").strip()
-
-
-def normalize_pages_url(url: str) -> str:
-    """
-    GitHub Pages for repo should look like:
-    https://user.github.io/repo/
-    Telegram WebView behaves best with trailing slash and without extra params.
-    """
-    url = (url or "").strip()
-    if not url:
-        return url
-
-    # remove fragments
-    url = url.split("#", 1)[0]
-
-    # keep query if you really need it later, but NOW we remove it to avoid Telegram/GitHub weirdness
-    url = url.split("?", 1)[0]
-
-    # enforce trailing slash
-    if not url.endswith("/"):
-        url += "/"
-    return url
-
-
-DOMINO_WEBAPP_URL = normalize_pages_url(DOMINO_WEBAPP_URL)
-WALLETHUNTER_WEBAPP_URL = normalize_pages_url(WALLETHUNTER_WEBAPP_URL)
+DOMINO_WEBAPP_URL = (os.getenv("DOMINO_WEBAPP_URL") or "https://kozanostro.github.io/miniapp/?v=21").strip()
+WALLETHUNTER_WEBAPP_URL = (os.getenv("WALLETHUNTER_WEBAPP_URL") or "https://kozanostro.github.io/wallet-hunter-miniapp/?v=1").strip()
 
 
 def parse_admin_ids(s: str) -> Set[int]:
@@ -75,8 +51,7 @@ ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "1901263391"))
 bot = TeleBot(BOT_TOKEN)
 
 print(f"[BOT] VERSION=BOT-1.06 starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
-print(f"[BOT] DOMINO_WEBAPP_URL={DOMINO_WEBAPP_URL}")
-print(f"[BOT] WALLETHUNTER_WEBAPP_URL={WALLETHUNTER_WEBAPP_URL}")
+# =========================================================
 
 
 # ===================== DB =====================
@@ -168,6 +143,14 @@ def upsert_user(tg_user):
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+# =========================================================
+
+
+# ===================== URL HELPERS =====================
+def add_query_param(url: str, key: str, value: str) -> str:
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{key}={value}"
+# =========================================================
 
 
 # ===================== UI =====================
@@ -186,9 +169,12 @@ def games_menu():
 
 
 def wallet_hunter_inline():
+    # параметр wallet=ton добавляем безопасно
+    url = add_query_param(WALLETHUNTER_WEBAPP_URL, "wallet", "ton")
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("▶️ Открыть Wallet Hunter", web_app=types.WebAppInfo(url=WALLETHUNTER_WEBAPP_URL)))
+    kb.add(types.InlineKeyboardButton("▶️ Открыть Wallet Hunter", web_app=types.WebAppInfo(url=url)))
     return kb
+# =========================================================
 
 
 # ===================== FEEDBACK FLOW =====================
@@ -231,12 +217,14 @@ def on_feedback_text(message):
         bot.send_message(message.chat.id, "✅ Отправлено админу.", reply_markup=main_menu())
     else:
         bot.send_message(message.chat.id, "⚠️ Не удалось доставить админу (проверь ADMIN_IDS).", reply_markup=main_menu())
+# =========================================================
 
 
 # ===================== HANDLERS =====================
 @bot.message_handler(commands=["start"])
 def start(message):
     upsert_user(message.from_user)
+    # Telegram кешит ReplyKeyboard — поэтому сначала снимаем, потом ставим снова
     bot.send_message(message.chat.id, "Обновляю меню…", reply_markup=types.ReplyKeyboardRemove())
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
 
@@ -280,6 +268,191 @@ def on_callback(call):
         bot.send_message(call.message.chat.id, "Smash: в разработке.")
     else:
         bot.answer_callback_query(call.id, "Неизвестная команда")
+# =========================================================
+
+
+# ===================== ADMIN =====================
+def admin_guard(message) -> bool:
+    if not is_admin(message.from_user.id):
+        bot.send_message(message.chat.id, "⛔ Команда доступна только админу.")
+        return False
+    return True
+
+
+@bot.message_handler(commands=["adminhelp"])
+def adminhelp(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+    bot.send_message(
+        message.chat.id,
+        "🔧 Admin команды:\n"
+        "/users [N] — последние N пользователей (по умолчанию 20)\n"
+        "/user <id> — карточка пользователя\n"
+        "/setwin <id> <percent> — шанс выигрыша\n"
+        "/setgen <id> <level> — уровень генератора\n"
+        "/setbal <id> <mmc|ton|usdt|stars> <value> — баланс\n"
+        "/myid — показать твой Telegram ID\n"
+    )
+
+
+@bot.message_handler(commands=["users"])
+def cmd_users(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+
+    parts = (message.text or "").split()
+    limit = 20
+    if len(parts) >= 2:
+        try:
+            limit = max(1, min(200, int(parts[1])))
+        except Exception:
+            limit = 20
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, username, first_name, last_name, last_seen, win_chance, gen_level
+          FROM users
+         ORDER BY last_seen DESC
+         LIMIT ?
+    """, (limit,))
+    rows = cur.fetchall()
+
+    if not rows:
+        bot.send_message(message.chat.id, "Пока пользователей нет.")
+        return
+
+    lines = []
+    for r in rows:
+        uname = f"@{r['username']}" if r["username"] else f"{r['first_name'] or ''} {r['last_name'] or ''}".strip() or "—"
+        last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["last_seen"]))
+        lines.append(f"{r['user_id']} | {uname} | last: {last_seen} | win={r['win_chance']:.1f}% | gen={r['gen_level']}")
+
+    bot.send_message(message.chat.id, "👥 Users:\n" + "\n".join(lines))
+
+
+@bot.message_handler(commands=["user"])
+def cmd_user(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "Используй: /user <id>")
+        return
+
+    try:
+        uid = int(parts[1])
+    except Exception:
+        bot.send_message(message.chat.id, "ID должен быть числом.")
+        return
+
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    r = cur.fetchone()
+    if not r:
+        bot.send_message(message.chat.id, "Пользователь не найден.")
+        return
+
+    created = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"]))
+    last = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["last_seen"]))
+    uname = f"@{r['username']}" if r["username"] else "—"
+
+    text = (
+        f"👤 User {r['user_id']}\n"
+        f"username: {uname}\n"
+        f"name: {(r['first_name'] or '')} {(r['last_name'] or '')}\n"
+        f"lang: {r['language']}\n"
+        f"created: {created}\n"
+        f"last_seen: {last}\n\n"
+        f"win: {r['win_chance']:.1f}%\n"
+        f"gen: {r['gen_level']}\n"
+        f"bal: mmc={r['bal_mmc']}, ton={r['bal_ton']}, usdt={r['bal_usdt']}, stars={r['bal_stars']}"
+    )
+    bot.send_message(message.chat.id, text)
+
+
+@bot.message_handler(commands=["setwin"])
+def cmd_setwin(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "Используй: /setwin <id> <percent>")
+        return
+
+    try:
+        uid = int(parts[1])
+        percent = float(parts[2])
+        percent = max(0.0, min(100.0, percent))
+    except Exception:
+        bot.send_message(message.chat.id, "Неверный формат. Пример: /setwin 123 10")
+        return
+
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET win_chance=? WHERE user_id=?", (percent, uid))
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ win_chance для {uid} = {percent:.1f}%")
+
+
+@bot.message_handler(commands=["setgen"])
+def cmd_setgen(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "Используй: /setgen <id> <level>")
+        return
+
+    try:
+        uid = int(parts[1])
+        level = int(parts[2])
+        level = max(0, min(999, level))
+    except Exception:
+        bot.send_message(message.chat.id, "Неверный формат. Пример: /setgen 123 5")
+        return
+
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET gen_level=? WHERE user_id=?", (level, uid))
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ gen_level для {uid} = {level}")
+
+
+@bot.message_handler(commands=["setbal"])
+def cmd_setbal(message):
+    upsert_user(message.from_user)
+    if not admin_guard(message):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        bot.send_message(message.chat.id, "Используй: /setbal <id> <mmc|ton|usdt|stars> <value>")
+        return
+
+    try:
+        uid = int(parts[1])
+        asset = parts[2].lower()
+        value = float(parts[3])
+    except Exception:
+        bot.send_message(message.chat.id, "Неверный формат. Пример: /setbal 123 usdt 50")
+        return
+
+    col = {"mmc": "bal_mmc", "ton": "bal_ton", "usdt": "bal_usdt", "stars": "bal_stars"}.get(asset)
+    if not col:
+        bot.send_message(message.chat.id, "Asset должен быть: mmc | ton | usdt | stars")
+        return
+
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {col}=? WHERE user_id=?", (value, uid))
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ {asset} для {uid} = {value}")
+# =========================================================
 
 
 # ===================== RUN =====================
