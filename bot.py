@@ -1,6 +1,6 @@
 # bot.py — WalletHunter Telegram Bot
-# VERSION: BOT-1.04-fixed
-# Last update: syntax cleanup + stable menus + correct WalletHunter URL params
+# VERSION: BOT-1.05 (stable)
+# Goal: Wallet Hunter as separate MAIN button (opens WebApp), Games contain only Domino+Smash.
 
 import os
 import sqlite3
@@ -21,10 +21,7 @@ except Exception:
 # ===================== ENV / SETTINGS =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env "
-        "or export it in your service environment."
-    )
+    raise RuntimeError("BOT_TOKEN is empty. Put BOT_TOKEN=... into /opt/wallethunter/backend/.env")
 
 DB_PATH = os.getenv("DB_PATH", "/opt/wallethunter/backend/bot.db").strip()
 
@@ -54,7 +51,7 @@ def parse_admin_ids(s: str) -> Set[int]:
 ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", "1901263391"))
 bot = TeleBot(BOT_TOKEN)
 
-print(f"[BOT] VERSION=BOT-1.04-fixed starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
+print(f"[BOT] VERSION=BOT-1.05 starting… DB_PATH={DB_PATH} ADMIN_IDS={sorted(list(ADMIN_IDS))}")
 # =========================================================
 
 
@@ -152,40 +149,38 @@ def is_admin(user_id: int) -> bool:
 
 # ===================== URL HELPERS =====================
 def add_query_param(url: str, key: str, value: str) -> str:
-    """
-    Adds ?key=value or &key=value depending on whether URL already has '?'.
-    Does not use '#fragment' because Telegram WebApp may ignore it.
-    """
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}{key}={value}"
 # =========================================================
 
 
 # ===================== UI =====================
-def main_menu_inline():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("▶️ Wallet Hunter", web_app=types.WebAppInfo(url=WALLETHUNTER_WEBAPP_URL)))
-    kb.add(types.InlineKeyboardButton("🎮 Игры", callback_data="menu_games"))
+def main_menu():
+    """
+    Главное меню — ReplyKeyboard (внизу).
+    Wallet Hunter тут НЕ текстовый обработчик: мы открываем мини-апп через inline-кнопку ниже.
+    """
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🎮 Игры", "🔍 Wallet Hunter")
+    kb.row("💎 Стейкинг", "📩 Обратная связь")
     return kb
 
 
 def games_menu():
     kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton(
-            "🁫 Domino (Mini App)",
-            web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)
-        )
-    )
-    kb.add(
-        types.InlineKeyboardButton(
-            "💥 Smash (скоро)",
-            callback_data="game_smash"
-        )
-    )
+    kb.add(types.InlineKeyboardButton("🁫 Domino (Mini App)", web_app=types.WebAppInfo(url=DOMINO_WEBAPP_URL)))
+    kb.add(types.InlineKeyboardButton("💥 Smash (скоро)", callback_data="game_smash"))
     return kb
 
 
+def wallet_hunter_inline():
+    """
+    Inline кнопка, которая реально открывает WebApp.
+    """
+    url = add_query_param(WALLETHUNTER_WEBAPP_URL, "wallet", "ton")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("▶️ Открыть Wallet Hunter", web_app=types.WebAppInfo(url=url)))
+    return kb
 # =========================================================
 
 
@@ -193,7 +188,7 @@ def games_menu():
 WAIT_FEEDBACK = set()
 
 
-@bot.message_handler(func=lambda m: m.text == "📩 Обратная связь")
+@bot.message_handler(func=lambda m: (m.text or "") == "📩 Обратная связь")
 def on_feedback(message):
     upsert_user(message.from_user)
     WAIT_FEEDBACK.add(message.from_user.id)
@@ -204,7 +199,7 @@ def on_feedback(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.from_user.id in WAIT_FEEDBACK and (m.text is not None))
+@bot.message_handler(func=lambda m: (m.from_user.id in WAIT_FEEDBACK) and (m.text is not None))
 def on_feedback_text(message):
     WAIT_FEEDBACK.discard(message.from_user.id)
     upsert_user(message.from_user)
@@ -233,32 +228,12 @@ def on_feedback_text(message):
 
 
 # ===================== HANDLERS =====================
-@bot.message_handler(func=lambda m: True, content_types=["text"])
-def _debug_all_text(message):
-    print(f"[DEBUG] text='{message.text}' from={message.from_user.id}")
-    # НЕ отвечаем пользователю, только лог в консоль
-
-@bot.message_handler(func=lambda m: (m.text or "").strip().lower() == "wallet hunter")
-def open_wallet_hunter(message):
-    upsert_user(message.from_user)
-
-    url = WALLETHUNTER_WEBAPP_URL
-    url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(
-        "▶️ Запустить Wallet Hunter",
-        web_app=types.WebAppInfo(url=url)
-    ))
-
-    bot.send_message(message.chat.id, "Запускаю Wallet Hunter:", reply_markup=kb)
-
 @bot.message_handler(commands=["start"])
 def start(message):
     upsert_user(message.from_user)
+    # Убираем старую клавиатуру (Telegram кешит) и отправляем новую
     bot.send_message(message.chat.id, "Обновляю меню…", reply_markup=types.ReplyKeyboardRemove())
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
-
 
 
 @bot.message_handler(commands=["myid"])
@@ -267,35 +242,33 @@ def myid(message):
     bot.send_message(message.chat.id, f"Ваш ID: {message.from_user.id}")
 
 
-@bot.message_handler(func=lambda m: m.text == "🎮 Игры")
+@bot.message_handler(func=lambda m: (m.text or "") == "🎮 Игры")
 def on_games(message):
     upsert_user(message.from_user)
     bot.send_message(message.chat.id, "Выбери игру:", reply_markup=games_menu())
 
 
-@bot.message_handler(func=lambda m: (m.text or "").strip().lower() in ["wallet hunter", "🔍 wallet hunter"])
-def on_wallet_hunter(message):
+@bot.message_handler(func=lambda m: (m.text or "") == "🔍 Wallet Hunter")
+def on_wallet_hunter_button(message):
+    """
+    ВАЖНО: ReplyKeyboard кнопка всегда шлёт текст.
+    Мы не пытаемся “открыть WebApp напрямую” через reply keyboard (так нельзя).
+    Мы отвечаем сообщением с inline кнопкой, которая открывает WebApp.
+    """
     upsert_user(message.from_user)
-
-    url = WALLETHUNTER_WEBAPP_URL
-    url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("▶️ Запустить Wallet Hunter", web_app=types.WebAppInfo(url=url)))
-
-    bot.send_message(message.chat.id, "Запускаю Wallet Hunter:", reply_markup=kb)
+    bot.send_message(
+        message.chat.id,
+        "🔍 Wallet Hunter\n\nНажми кнопку ниже, чтобы открыть мини-апп:",
+        reply_markup=wallet_hunter_inline()
+    )
 
 
-
-
-
-@bot.message_handler(func=lambda m: m.text == "💎 Стейкинг")
+@bot.message_handler(func=lambda m: (m.text or "") == "💎 Стейкинг")
 def on_staking(message):
     upsert_user(message.from_user)
     bot.send_message(
         message.chat.id,
-        "💎 Стейкинг (пока заглушка).\n"
-        "Позже сюда добавим MMCoin/условия/историю.",
+        "💎 Стейкинг (пока заглушка).\nПозже сюда добавим MMCoin/условия/историю.",
         reply_markup=main_menu()
     )
 
@@ -503,8 +476,3 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
-
-
-
-
-
