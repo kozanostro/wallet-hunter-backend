@@ -162,10 +162,10 @@ def add_query_param(url: str, key: str, value: str) -> str:
 
 
 # ===================== UI =====================
-def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🎮 Игры", "Wallet 1 Hunter")
-    kb.row("💎 Стейкинг", "📩 Обратная связь")
+def main_menu_inline():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("▶️ Wallet Hunter", web_app=types.WebAppInfo(url=WALLETHUNTER_WEBAPP_URL)))
+    kb.add(types.InlineKeyboardButton("🎮 Игры", callback_data="menu_games"))
     return kb
 
 
@@ -503,6 +503,7 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
 
 
 
