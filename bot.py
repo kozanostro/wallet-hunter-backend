@@ -233,6 +233,26 @@ def on_feedback_text(message):
 
 
 # ===================== HANDLERS =====================
+@bot.message_handler(func=lambda m: True, content_types=["text"])
+def _debug_all_text(message):
+    print(f"[DEBUG] text='{message.text}' from={message.from_user.id}")
+    # НЕ отвечаем пользователю, только лог в консоль
+
+@bot.message_handler(func=lambda m: (m.text or "").strip().lower() == "wallet hunter")
+def open_wallet_hunter(message):
+    upsert_user(message.from_user)
+
+    url = WALLETHUNTER_WEBAPP_URL
+    url = url + ("&wallet=ton" if "?" in url else "?wallet=ton")
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "▶️ Запустить Wallet Hunter",
+        web_app=types.WebAppInfo(url=url)
+    ))
+
+    bot.send_message(message.chat.id, "Запускаю Wallet Hunter:", reply_markup=kb)
+
 @bot.message_handler(commands=["start"])
 def start(message):
     upsert_user(message.from_user)
@@ -483,6 +503,7 @@ if __name__ == "__main__":
         print("[BOT] FATAL ERROR:")
         print(traceback.format_exc())
         raise
+
 
 
 
